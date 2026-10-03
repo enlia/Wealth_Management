@@ -151,6 +151,25 @@
 | **镜像缺包** | `mlfinlab` 在腾讯镜像 **404**，官方 PyPI 有 | 已配 `pypi-fallback` 索引（`explicit = true`）兜底 |
 | **mlfinlab 实际不可用** | 新版需 Hudson & Thames **商业许可** | 其 `deflated_sharpe_ratio` 按 **Bailey & López de Prado (2014) 论文公式**自实现（公式不受版权保护，**不复制 GPL 源码**） |
 
+### 3.2 alphalens-reloaded 0.4.6 API 实测坑（全部由 review 流程发现）
+这个库的文档与实际行为有多处不符，**凭记忆写必踩坑**：
+
+| 坑 | 症状 | 正确用法 |
+|---|---|---|
+| **factor 的 MultiIndex 顺序** | 报 `'Index' object has no attribute 'tz'` | 必须是 **(date=level0, asset=level1)**，传反就崩 |
+| **period 列名是字符串** | `qr.loc[1, 1]` → KeyError: 1 | 列名是 `'1D'`/`'5D'`，用 `f"{p}D"` |
+| **`mean_return_by_quantile` 返回元组** | `'tuple' object has no attribute 'xs'` | 解包 `qr, std_err = ...` |
+| **`quantile_turnover` 需逐分组调用** | 传 `quantiles=` → TypeError | 签名是 `(quantile_factor, quantile, period)`，用字典 comprehension 循环 |
+| **`factor_information_coefficient` 返回每日 IC** | 直接取 mean 会得到 0 | 需自行聚合 mean/std/IR/t-stat |
+| **`demeaned=True`（默认）会按日去均值** | 丢失因子绝对值信息 | 动量类设 `demeaned=False` |
+| **`zero_aware=True` 导致分位编号错乱** | `compute_mean_returns_spread` 报 Index 必须 MultiIndex | 动量/反转类必须 `False`；离散取值因子（hhhl）才用 `True` |
+| **`compute_mean_returns_spread` 依赖特定 index 结构** | 各种变体下易崩 | 直接 `qr.loc[Q] - qr.loc[1]`，更可控 |
+
+**正确做法**：先 `inspect.signature()` 看清签名，再跑一次探针脚本打印返回类型，最后才写适配层。不要凭直觉试。
+
+### 3.3 pandas 2.x 的 stack 层级顺序会变
+`DataFrame.stack()` 在 pandas 2.x 得到 `(index, column)` 顺序，与旧版相反。构造 MultiIndex **一律用 `pd.MultiIndex.from_arrays`**，不要用 stack 后改 names。
+
 常用命令：
 ```bash
 cd C:/Documentation/Wealth_Management/09_研究项目/factor_lab
@@ -214,8 +233,28 @@ Wealth_Management/
 - 黄金分割实证（1,273 样本）：**0.618 已被严格检验为无独立预测力**
 - 文献证据整理（40+ 篇，07_知识与文献）
 
+### 已完成的因子检验（2026-10-03，全市场 5,593 只 A 股 / 2,611 日 / 2016-2026）
+
+| 因子 | IC均值 | ICIR | 多空年化毛 | 多空年化净 | 换手 | 子区间方向 |
+|---|---|---|---|---|---|---|
+| rev5 (5日反转) | **+0.0416** | **+0.2755** | +0.05% | **-0.45%** | 49.4% | 三段全正但衰减 0.42→0.28→0.20 |
+| mom120_skip20 | -0.0236 | -0.1603 | -0.05% | -0.19% | 13.7% | 三段全负 |
+| mom60_skip20 | -0.0276 | -0.1786 | -0.05% | -0.23% | 17.4% | 三段全负 |
+| vol60 (波动率) | -0.0399 | -0.2088 | -0.03% | -0.09% | 5.2% | 三段全负（=低波动异象成立）|
+
+**三条结论**：
+1. **A 股中期动量是负向的**（IC -0.024~-0.028，三段一致为负）——与 T+1 制度抑制动量的文献一致
+2. **5 日反转是唯一正向因子**，但 ICIR 逐年衰减
+3. **所有因子扣成本后净收益全为负**。rev5 毛收益仅 +0.05%/年，
+   而年换手 49.4% × 20bp × 5组 = 4.94%/年成本 → 净 -0.45%
+   → **A 股横截面高换手轮动在扣除成本后不可行**
+
+**这条结论直接回应用户多轮追问的「追涨能不能赚钱」：不能。**
+
 ### 下一步
-**动量/反转因子有效性检验**——价量数据已 100% 完备，是当前最该做的研究。
+1. 修 hhhl20（离散取值因子需 zero_aware=True）
+2. 财务因子（等现金流量表数据补齐）
+3. 低换手版本的研究（月频调仓，换手可降到 5% 以下，成本降到 0.1% 以下）
 
 ---
 
