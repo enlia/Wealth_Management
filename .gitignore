@@ -1,0 +1,92 @@
+# ── 数据文件（不进 git，体积大且可从源重建）────────────────────
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+02_数据库/
+raw/
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.pt
+*.pth
+
+# ── 数据产出（可由脚本重新生成）────────────────────────────
+out/
+output/
+results/
+reports/generated/
+*.csv
+!docs/**/*.csv
+!09_研究项目/**/*.csv
+!**/README*.csv
+*_raw.txt
+*_result.csv
+*_detail.csv
+cases_dated.csv
+fib_tdx_cases.csv
+cross_validation.csv
+cand_fail.csv
+cand_success.csv
+
+# ── 第三方开源项目（只读参考，不纳入本项目版本控制）──────────
+06_开源项目/
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── 虚拟环境（uv）──────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── uv / 工具缓存 ─────────────────────────────────────────
+.uv/
+uv-cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ── IDE / 系统 ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 密钥与凭证 ─────────────────────────────────────────────
+.env
+*.key
+*.pem
+token.txt
+*tushare_token*

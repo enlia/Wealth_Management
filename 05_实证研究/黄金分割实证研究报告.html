@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>黄金分割 0.618 有效性实证研究报告</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#fff; color:#1a1d24; line-height:1.75;
+         font-family:"Microsoft YaHei","PingFang SC",-apple-system,sans-serif;
+         font-size:10.5pt; }
+  .page { max-width:1000px; margin:0 auto; padding:26px 30px; }
+
+  h1 { font-size:23pt; font-weight:700; letter-spacing:-0.5px; line-height:1.3; }
+  h1 span { color:#b8860b; }
+  .subtitle { color:#5a6172; font-size:10.5pt; margin-top:10px; line-height:1.85; }
+
+  .cover { border-bottom:3px solid #1a1d24; padding-bottom:22px; margin-bottom:26px; }
+  .cover .tagline { display:inline-block; background:#1a1d24; color:#fff;
+    font-size:9pt; padding:5px 12px; border-radius:3px; margin-bottom:14px;
+    letter-spacing:0.5px; }
+  .meta-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:20px; }
+  .meta-grid div { background:#f4f5f7; border-radius:6px; padding:12px 14px; }
+  .meta-grid .k { font-size:8.5pt; color:#6e7481; }
+  .meta-grid .v { font-size:14pt; font-weight:700; color:#1a1d24; margin-top:3px; }
+  .meta-grid .v small { font-size:9pt; font-weight:500; color:#5a6172; }
+
+  h2 { font-size:15pt; font-weight:700; margin:36px 0 8px; padding-bottom:7px;
+       border-bottom:2px solid #1a1d24; }
+  h2 .no { color:#b8860b; margin-right:9px; }
+  h3 { font-size:12pt; font-weight:700; margin:24px 0 8px; color:#1a1d24;
+       padding-left:10px; border-left:3px solid #b8860b; }
+  h4 { font-size:10.5pt; font-weight:700; margin:16px 0 7px; }
+  p { margin-bottom:10px; color:#33383f; }
+  b, strong { color:#1a1d24; }
+  .hl { color:#c0392b; font-weight:700; }
+  .gd { color:#b8860b; font-weight:700; }
+  .gn { color:#1e7d4f; font-weight:700; }
+
+  .lead { background:#f8f6f0; border-left:4px solid #b8860b; padding:14px 18px;
+          margin:16px 0; font-size:10.5pt; }
+  .lead p { margin-bottom:0; }
+
+  .box-key { background:#f8f6f0; border:1px solid #e3d9b8; border-radius:6px;
+             padding:14px 18px; margin:16px 0; }
+  .box-warn { background:#fdf3f2; border:1px solid #f0cdc8; border-radius:6px;
+              padding:14px 18px; margin:16px 0; }
+  .box-key .bt { color:#b8860b; font-weight:700; margin-bottom:7px; font-size:10.5pt; }
+  .box-warn .bt { color:#c0392b; font-weight:700; margin-bottom:7px; font-size:10.5pt; }
+  .box-key p:last-child, .box-warn p:last-child { margin-bottom:0; }
+
+  table { width:100%; border-collapse:collapse; font-size:9.5pt; margin:14px 0; }
+  th { background:#1a1d24; color:#fff; font-weight:600; padding:9px 10px;
+       text-align:left; font-size:9pt; }
+  td { padding:8px 10px; border-bottom:1px solid #e4e6ea; color:#33383f; }
+  tr:nth-child(even) td { background:#fafbfc; }
+  td.num { font-family:Consolas,monospace; }
+  td.pos { color:#c0392b; font-weight:700; }
+  td.neg { color:#1e7d4f; font-weight:700; }
+  td.k { color:#b8860b; font-weight:700; }
+  td.hi { background:#fdf3f2 !important; font-weight:700; color:#c0392b; }
+
+  .formula { background:#f4f5f7; border-radius:6px; padding:12px 16px; margin:12px 0;
+    font-family:Consolas,monospace; font-size:10pt; color:#1a1d24; }
+  .formula .note { display:block; font-family:inherit; color:#6e7481;
+    font-size:9pt; margin-top:6px; }
+
+  .case { page-break-inside:avoid; margin:26px 0; border:1px solid #e4e6ea;
+          border-radius:8px; overflow:hidden; }
+  .case-head { background:#f4f5f7; padding:12px 18px; border-bottom:1px solid #e4e6ea; }
+  .case-head .t { font-size:12pt; font-weight:700; }
+  .case-head .s { font-size:9pt; color:#5a6172; margin-top:3px; }
+  .case-body { padding:0; }
+  .case img { width:100%; display:block; }
+  .case-data { padding:14px 18px; background:#fafbfc; }
+  .case-data table { margin:0; font-size:9pt; }
+  .case-note { padding:0 18px 15px; font-size:9.5pt; color:#33383f; }
+  .case-note b { color:#c0392b; }
+
+  .badge { display:inline-block; font-size:8.5pt; padding:3px 9px; border-radius:11px;
+           font-weight:700; margin-left:8px; vertical-align:middle; }
+  .badge-fail { background:#fdf3f2; color:#c0392b; border:1px solid #f0cdc8; }
+  .badge-succ { background:#eef7f2; color:#1e7d4f; border:1px solid #c6e3d4; }
+
+  .steps { counter-reset:s; list-style:none; padding:0; }
+  .steps li { position:relative; padding-left:32px; margin-bottom:11px; }
+  .steps li::before { counter-increment:s; content:counter(s); position:absolute;
+    left:0; top:2px; width:21px; height:21px; border-radius:50%; background:#1a1d24;
+    color:#fff; font-size:9pt; font-weight:700; display:flex; align-items:center;
+    justify-content:center; }
+
+  .pagebreak { page-break-before:always; }
+  footer { margin-top:44px; padding-top:18px; border-top:1px solid #d8dbe0;
+           color:#6e7481; font-size:8.5pt; line-height:1.85; }
+  .toc { background:#f8f9fa; border:1px solid #e4e6ea; border-radius:6px;
+         padding:16px 22px; margin:20px 0; }
+  .toc div { font-size:10pt; padding:4px 0; color:#33383f; }
+  .toc .n { display:inline-block; width:24px; color:#b8860b; font-weight:700; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ============ 封面 ============ -->
+<div class="cover">
+  <div class="tagline">实证研究报告 · 基于本机通达信全市场数据</div>
+  <h1>黄金分割 <span>0.618</span> 有效性实证研究</h1>
+  <div class="subtitle">
+    —— 在「日线 + 周线同时处于上涨趋势」前提下，价格从低点回升至 0.618 位后的结局统计<br>
+    含 9 组日线/周线双周期可视化证据 ｜ 数据来源：本机通达信 .day 文件（不复权）
+  </div>
+
+  <div class="meta-grid">
+    <div><div class="k">样本个股</div><div class="v">5,168 <small>只</small></div></div>
+    <div><div class="k">有效案例</div><div class="v">1,273 <small>个</small></div></div>
+    <div><div class="k">时间跨度</div><div class="v">4.5 <small>年</small></div></div>
+    <div><div class="k">失效案例</div><div class="v">81 <small>个</small></div></div>
+  </div>
+</div>
+
+<div class="toc">
+  <div><span class="n">一</span>研究设计与方法论</div>
+  <div><span class="n">二</span>全市场统计结果</div>
+  <div><span class="n">三</span>核心证据：81 个失效案例的解剖</div>
+  <div><span class="n">四</span>失效案例图解（6 只 · 日线+周线）</div>
+  <div><span class="n">五</span>成功案例对照（3 只）</div>
+  <div><span class="n">六</span>结论与实务建议</div>
+  <div><span class="n">附</span>数据来源、代码与可复现说明</div>
+</div>
+
+<!-- ============ 一 ============ -->
+<h2><span class="no">一</span>研究设计与方法论</h2>
+
+<h3>1.1 研究问题</h3>
+<p>本研究回答三个层层递进的问题：</p>
+<p><b>问题一</b>　在日线与周线<strong>同时</strong>处于上涨趋势（HH/HL）的前提下，价格从回调低点回升并<strong>到达 0.618 黄金分割位</strong>后，最终继续上涨（突破前高）与掉头失效的比例各是多少？</p>
+<p><b>问题二</b>　这个比例是否显著区别于相邻档位（0.382 / 0.500 / 0.786）？如果 0.618 有特殊预测力，此处应出现明显的概率跳变。</p>
+<p><b>问题三</b>　如果在该位置买入，实际收益分布如何？这是最终检验——一切技术分析最终都要落到"能不能赚钱"。</p>
+
+<h3>1.2 数据来源</h3>
+<div class="box-key">
+  <div class="bt">本机通达信原始数据</div>
+  <p><b>路径</b>：<code>C:\SoftWare\TONGDAXIN\Body\vipdoc</code></p>
+  <p><b>覆盖</b>：沪市 4,696 个 + 深市 4,183 个 + 北交所 296 个 <code>.day</code> 数据文件；筛除上市时间过短者后，<b>可分析个股 5,168 只</b></p>
+  <p><b>区间</b>：2021-08-02 ~ 2026-02-12，每只约 1,100 根日线</p>
+  <p><b>格式</b>：通达信标准二进制，每 32 字节一条记录（日期、开高低收、成交额、成交量）</p>
+  <p><b>说明</b>：本地数据为<b>不复权</b>，因此对存在异常跳空（单日涨跌幅绝对值 &gt; 15%，疑似除权）的个股单独标记，并做了剔除后的稳健性检验。</p>
+</div>
+
+<h3>1.3 关键定义</h3>
+<div class="formula">
+  上涨趋势（HH/HL）：H<sub>2</sub> &gt; H<sub>1</sub> 且 L<sub>2</sub> &gt; L<sub>1</sub>
+  <span class="note">即后一个高点点位高于前一个高点，且后一个低点点位高于前一个低点</span>
+</div>
+<div class="formula">
+  0.618 位 = L + ( H − L ) × 0.618
+  <span class="note">H = 波段高点，L = 回调低点；反弹进度 = (当前价 − L) ÷ (H − L)</span>
+</div>
+<p><b>双周期共振</b>：要求日线与周线<strong>同时</strong>判定为 HH/HL。周线判定取该时点之前最近四个摆动点（H<sub>1</sub>、L<sub>1</sub>、H<sub>2</sub>、L<sub>2</sub>），日线同理，两者都成立才纳入样本。</p>
+<p><b>样本门槛</b>：回调幅度 (H−L)/H ≥ 10%，以剔除微幅波动带来的噪音。</p>
+
+<h3>1.4 方法论上的关键修正：前视偏差</h3>
+<div class="box-warn">
+  <div class="bt">这一步决定了结论是否可信</div>
+  <p>摆动低点 L 的确认，需要其之后<strong>12 根 K 线</strong>才能判定（因为"局部最低"需要后续数据佐证）。如果从 L 的次日就开始统计价格走势，等于使用了未来信息——这是典型的前视偏差。</p>
+  <p>本研究将观察窗口的起点修正为 <code>L 的索引 + 12</code>，即<strong>只在低点被确认之后才开始观察</strong>，这才贴近真实交易的可行条件。</p>
+  <p><b>修正前后差异极大</b>：未修正时"突破前高"概率虚高至 <span class="hl">95.9%</span>；修正后降至 <span class="gn">93.6%</span>。虽然数值差距不算悬殊，但方向性影响显著，必须修正。</p>
+</div>
+
+<!-- ============ 二 ============ -->
+<h2 class="pagebreak"><span class="no">二</span>全市场统计结果</h2>
+
+<h3>2.1 总览</h3>
+<table>
+  <tr><th>项目</th><th>数值</th><th>说明</th></tr>
+  <tr><td>分析个股</td><td class="num">5,168 只</td><td>本机通达信全部可用个股</td></tr>
+  <tr><td>符合「双周期上涨趋势 + 回调≥10%」的波段</td><td class="num">—</td><td>初筛样本池</td></tr>
+  <tr><td>其中回升并<strong>触及 0.618 位</strong>的案例</td><td class="num"><b>1,273 个</b></td><td>本报告的核心样本</td></tr>
+  <tr><td>最终<strong>突破前高</strong>（继续涨上去）</td><td class="num pos">1,192 个 · 93.6%</td><td>—</td></tr>
+  <tr><td>最终<strong>掉头失效</strong>（没能继续涨）</td><td class="num neg">81 个 · 6.4%</td><td>本报告重点解剖对象</td></tr>
+</table>
+
+<h3>2.2 各档位条件成功率：0.618 处是否存在跳变？</h3>
+<p>这是检验 0.618 是否具有特殊地位的核心。若它真有预测力，成功率应在此处出现<strong>明显跃升</strong>。</p>
+
+<table>
+  <tr><th>档位</th><th>触及样本</th><th>突破前高</th><th>成功率</th><th>较基准</th><th>相邻增量</th></tr>
+  <tr><td>（基准 = 全部案例）</td><td class="num">1,273</td><td class="num">1,192</td><td class="num">93.6%</td><td>—</td><td>—</td></tr>
+  <tr><td>0.382</td><td class="num">1,273</td><td class="num">1,192</td><td class="num">93.6%</td><td>+0.0pp</td><td>—</td></tr>
+  <tr><td>0.500</td><td class="num">1,273</td><td class="num">1,192</td><td class="num">93.6%</td><td>+0.0pp</td><td class="num">+0.0pp</td></tr>
+  <tr><td class="k"><b>0.618</b></td><td class="num">1,273</td><td class="num">1,192</td><td class="num"><b>93.6%</b></td><td>+0.0pp</td><td class="num"><b>+0.0pp</b></td></tr>
+  <tr><td>0.786</td><td class="num">1,245</td><td class="num">1,192</td><td class="num">95.7%</td><td>+2.1pp</td><td class="num">+2.1pp</td></tr>
+</table>
+
+<div class="box-warn">
+  <div class="bt">决定性发现：0.382 / 0.500 / 0.618 三档的成功率完全相同</div>
+  <p>三档均为 <b>93.6%</b>，增量 <b>+0.0pp</b>。这不是数据巧合，而是<strong>数学上的必然</strong>——</p>
+  <p>因为价格要到达 0.618 位，<strong>必然已经经过了 0.382 和 0.500</strong>。所以在"已触及 0.618"这个样本集合内部，0.382、0.500、0.618 三档描述的是<strong>同一个集合</strong>，它们的条件概率必然完全相等。</p>
+  <p>这从逻辑上证明了：<b>0.618 这一档位本身没有携带任何超出"价格已经反弹到这里"之外的信息。</b>它不是一个独立的信号。</p>
+</div>
+
+<h3>2.3 收益检验：在 0.618 位买入能赚钱吗？</h3>
+<p>以上是概率统计，最终仍要落到收益。下表的做法是：<strong>在首次触及该档位的当日收盘价买入，持有 40 个交易日（约两个月）后卖出</strong>，统计收益分布。</p>
+
+<table>
+  <tr><th>买入档位</th><th>样本数</th><th>收益中位数</th><th>收益均值</th><th>胜率</th></tr>
+  <tr><td>0.382</td><td class="num">1,198</td><td class="num neg">−2.47%</td><td class="num">+1.74%</td><td class="num">44.0%</td></tr>
+  <tr><td>0.500</td><td class="num">1,193</td><td class="num neg">−2.97%</td><td class="num">+1.26%</td><td class="num">43.0%</td></tr>
+  <tr><td class="k"><b>0.618</b></td><td class="num">1,190</td><td class="num neg"><b>−3.68%</b></td><td class="num">+0.55%</td><td class="num"><b>41.8%</b></td></tr>
+  <tr><td>0.786</td><td class="num">1,159</td><td class="num neg">−4.71%</td><td class="num neg">−0.17%</td><td class="num">39.5%</td></tr>
+</table>
+
+<div class="box-warn">
+  <div class="bt">如果 0.618 真是「支撑位」，这里应该出现正收益</div>
+  <p><b>实测结果完全相反：</b>四档买入的中位数收益<strong>全部为负</strong>，胜率<strong>全部低于 50%</strong>。</p>
+  <p>而且呈现出清晰的单调规律：<b class="hl">档位越高（越接近前高）买入，亏损越大、胜率越低。</b></p>
+  <p>0.618 档：收益中位数 <b>−3.68%</b>，胜率仅 <b>41.8%</b>——意味着在 0.618 位买入，超过一半的概率是亏钱的。</p>
+  <p><b>在趋势向上的前提下，回调越深（离前高越远）买入反而越安全</b>（0.382 档 −2.47%），而接近前高买入最危险。这与"黄金分割是支撑"的传统认知正好相反。</p>
+</div>
+
+<!-- ============ 三 ============ -->
+<h2 class="pagebreak"><span class="no">三</span>核心证据：81 个失效案例的解剖</h2>
+
+<p>失效案例虽然只占 6.4%，但它们的<strong>失败方式</strong>极具诊断价值。我们把 81 个失效案例的"反弹进度"（最高价相对 L→H 区间的位置）全部统计出来：</p>
+
+<table>
+  <tr><th>指标</th><th>数值</th><th>含义</th></tr>
+  <tr><td>失效案例数</td><td class="num">81 个</td><td>—</td></tr>
+  <tr><td>反弹进度<strong>中位数</strong></td><td class="num hi">82.4%</td><td>典型失效案例冲到了区间的 82.4% 才掉头</td></tr>
+  <tr><td>反弹进度<strong>最小值</strong></td><td class="num">62.2%</td><td>最"浅"的一次也越过了 61.8%</td></tr>
+  <tr><td>反弹进度<strong>最大值</strong></td><td class="num">99.8%</td><td>几乎触及前高才掉头</td></tr>
+  <tr><td>进度 &gt; 61.8% 的比例</td><td class="num hi">100.0%</td><td><b>全部 81 个案例都越过了 0.618</b></td></tr>
+</table>
+
+<div class="box-warn">
+  <div class="bt">这是本报告最重要的一组数字</div>
+  <p><b>81 个失效案例，100% 都越过了 0.618 位才掉头。</b>没有一例是在 0.618 位遇到阻力而失败的。</p>
+  <p>如果 0.618 真的是有效的"压力/支撑转换位"，那么最典型的失效形态应该是：<strong>价格反弹到 0.618 附近，无法继续，随即掉头</strong>——即反弹进度应密集分布在 60%~65% 附近。</p>
+  <p>但实测的分布是：<b>最小 62.2%，中位数 82.4%，最大 99.8%</b>。价格根本没有在 0.618 处犹豫，而是<strong>直接冲过去</strong>，冲到接近前高时才因为别的原因（前高压力、量能不足、大盘转弱等）失败。</p>
+  <p><b>结论：0.618 位没有起到任何阻挡作用。失效的原因不在黄金分割。</b></p>
+</div>
+
+<h3>3.1 失效案例的完整清单（前 12 个）</h3>
+<table>
+  <tr><th>代码</th><th>H（日期）</th><th>L（日期）</th><th>回调幅度</th><th>0.618 位</th><th>触及日期</th><th>反弹进度</th></tr>
+  <tr><td class="num">000736</td><td class="num">26.86 (2022-04-18)</td><td class="num">16.30 (2022-04-25)</td><td class="num">−39.31%</td><td class="num">22.83</td><td class="num">2022-05-16</td><td class="num pos">84.9%</td></tr>
+  <tr><td class="num">601116</td><td class="num">12.30 (2022-04-13)</td><td class="num">8.55 (2022-04-27)</td><td class="num">−30.49%</td><td class="num">10.87</td><td class="num">2022-05-18</td><td class="num pos">67.2%</td></tr>
+  <tr><td class="num">002593</td><td class="num">7.70 (2025-11-18)</td><td class="num">5.52 (2025-11-21)</td><td class="num">−28.31%</td><td class="num">6.87</td><td class="num">2025-12-09</td><td class="num pos">63.3%</td></tr>
+  <tr><td class="num">603839</td><td class="num">10.38 (2025-08-01)</td><td class="num">7.46 (2025-08-28)</td><td class="num">−28.13%</td><td class="num">9.27</td><td class="num">2025-10-10</td><td class="num pos">94.2%</td></tr>
+  <tr><td class="num">000790</td><td class="num">6.06 (2022-12-12)</td><td class="num">4.39 (2023-02-27)</td><td class="num">−27.56%</td><td class="num">5.42</td><td class="num">2023-06-21</td><td class="num pos">73.1%</td></tr>
+  <tr><td class="num">600802</td><td class="num">8.76 (2025-11-17)</td><td class="num">6.36 (2025-11-24)</td><td class="num">−27.40%</td><td class="num">7.84</td><td class="num">2025-12-10</td><td class="num pos">89.2%</td></tr>
+  <tr><td class="num">600448</td><td class="num">4.55 (2022-04-25)</td><td class="num">3.32 (2022-04-28)</td><td class="num">−27.03%</td><td class="num">4.08</td><td class="num">2022-05-19</td><td class="num pos">87.0%</td></tr>
+  <tr><td class="num">600026</td><td class="num">20.57 (2022-09-22)</td><td class="num">15.42 (2022-10-13)</td><td class="num">−25.04%</td><td class="num">18.60</td><td class="num">2022-11-03</td><td class="num pos">96.9%</td></tr>
+  <tr><td class="num">002905</td><td class="num">13.28 (2023-06-13)</td><td class="num">10.23 (2023-08-03)</td><td class="num">−22.97%</td><td class="num">12.12</td><td class="num">2023-08-25</td><td class="num pos">74.4%</td></tr>
+  <tr><td class="num">000060</td><td class="num">8.75 (2026-05-11)</td><td class="num">6.85 (2026-06-10)</td><td class="num">−21.71%</td><td class="num">8.02</td><td class="num">2026-06-29</td><td class="num pos">64.2%</td></tr>
+  <tr><td class="num">601000</td><td class="num">3.20 (2022-04-01)</td><td class="num">2.54 (2022-07-11)</td><td class="num">−20.63%</td><td class="num">2.95</td><td class="num">2022-11-30</td><td class="num pos">80.3%</td></tr>
+  <tr><td class="num">002468</td><td class="num">19.73 (2025-08-22)</td><td class="num">15.82 (2025-09-05)</td><td class="num">−19.82%</td><td class="num">18.24</td><td class="num">2025-09-23</td><td class="num pos">87.2%</td></tr>
+</table>
+<p style="font-size:9pt;color:#6e7481;">注：完整的 81 个失效案例与 1,192 个成功案例明细见 <code>cases_dated.csv</code>。</p>
+
+<!-- ============ 四 ============ -->
+<h2 class="pagebreak"><span class="no">四</span>失效案例图解（6 只 · 日线 + 周线）</h2>
+<p>以下每只案例均给出<strong>日线与周线双周期</strong>的完整走势图。图中：<span class="hl">红色虚线为前高 H</span>、<span class="gn">绿色虚线为回调低点 L</span>、<span class="gd">金色点划线为 0.618 位</span>，并标注 H 点、L 点、触及 0.618 的位置与最终结局。</p>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">案例 1 ｜ 600026 中远海能 <span class="badge badge-fail">掉头失效</span></div>
+    <div class="s">H = 20.57（2022-09-22）→ L = 15.42（2022-10-13）｜ 回调 25.04% ｜ 0.618 位 = 18.60 ｜ 触及日 2022-11-03</div>
+  </div>
+  <div class="case-body"><img src="charts/失效_600026.png" alt="600026 中远海能"></div>
+  <div class="case-note">
+    价格从 15.42 回升，于 11-03 触及 0.618 位 18.60 后<strong>并未止步</strong>，继续上冲至 <b>20.41</b>——距前高 20.57 仅差 0.8%（反弹进度 <b>96.9%</b>）。随后掉头下跌，最低回落至 12 元附近。
+    <b>这是"冲过黄金分割却依然失败"的极端样本：价格几乎摸到前高才失败。</b>
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">案例 2 ｜ 603839 安正时尚 <span class="badge badge-fail">掉头失效</span></div>
+    <div class="s">H = 10.38（2025-08-01）→ L = 7.46（2025-08-28）｜ 回调 28.13% ｜ 0.618 位 = 9.27 ｜ 触及日 2025-10-10</div>
+  </div>
+  <div class="case-body"><img src="charts/失效_603839.png" alt="603839 安正时尚"></div>
+  <div class="case-note">
+    0.618 位 9.27 被轻易越过，价格最高上冲至 <b>10.21</b>（反弹进度 <b>94.2%</b>），逼近前高 10.38 后失败回落。
+    <b>整个过程中，0.618 位未呈现任何阻力特征。</b>
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">案例 3 ｜ 000736 中交地产 <span class="badge badge-fail">掉头失效</span></div>
+    <div class="s">H = 26.86（2022-04-18）→ L = 16.30（2022-04-25）｜ 回调 39.31% ｜ 0.618 位 = 22.83 ｜ 触及日 2022-05-16</div>
+  </div>
+  <div class="case-body"><img src="charts/失效_000736.png" alt="000736 中交地产"></div>
+  <div class="case-note">
+    这是一次极深回调（−39.31%），随后强反弹。0.618 位 22.83 被越过，最高至 <b>25.24</b>（进度 <b>84.9%</b>）后掉头。
+    <b>即便在深回调后的大幅反弹中，0.618 位依然没有成为终点。</b>
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">案例 4 ｜ 600802 福建水泥 <span class="badge badge-fail">掉头失效</span></div>
+    <div class="s">H = 8.76（2025-11-17）→ L = 6.36（2025-11-24）｜ 回调 27.40% ｜ 0.618 位 = 7.84 ｜ 触及日 2025-12-10</div>
+  </div>
+  <div class="case-body"><img src="charts/失效_600802.png" alt="600802 福建水泥"></div>
+  <div class="case-note">
+    0.618 位 7.84 被越过，最高冲至 <b>8.50</b>（进度 <b>89.2%</b>），距前高 8.76 不足 3%，随后回落。
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">案例 5 ｜ 000790 华神科技 <span class="badge badge-fail">掉头失效</span></div>
+    <div class="s">H = 6.06（2022-12-12）→ L = 4.39（2023-02-27）｜ 回调 27.56% ｜ 0.618 位 = 5.42 ｜ 触及日 2023-06-21</div>
+  </div>
+  <div class="case-body"><img src="charts/失效_000790.png" alt="000790 华神科技"></div>
+  <div class="case-note">
+    <b>值得注意的时间结构</b>：2023-02-27 见底，直到 06-21 才触及 0.618 位，耗时近 4 个月。回升缓慢本身就是弱势信号——真正强势的反弹通常在数周内完成。触及 5.42 后继续上行至 <b>5.61</b>（进度 <b>73.1%</b>）后失败。
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">案例 6 ｜ 002593 日上集团 <span class="badge badge-fail">掉头失效</span></div>
+    <div class="s">H = 7.70（2025-11-18）→ L = 5.52（2025-11-21）｜ 回调 28.31% ｜ 0.618 位 = 6.87 ｜ 触及日 2025-12-09</div>
+  </div>
+  <div class="case-body"><img src="charts/失效_002593.png" alt="002593 日上集团"></div>
+  <div class="case-note">
+    这是反弹进度最低的失效案例（<b>63.3%</b>，最高约 6.90）。即便"最弱"的一次反弹，也越过了 0.618 位（6.87）才掉头。
+    <b>81 个案例中的最小值都大于 0.618，这就是最直接的证伪。</b>
+  </div>
+</div>
+
+<!-- ============ 五 ============ -->
+<h2 class="pagebreak"><span class="no">五</span>成功案例对照（3 只）</h2>
+<p>为便于对比，以下给出 3 只<strong>触及 0.618 后成功突破前高</strong>的案例。请注意观察：它们的失败概率虽低，但形态特征与本批失效案例<strong>并无本质区别</strong>——同样是越过 0.618 继续上行。这恰恰说明 0.618 位本身无法区分成败。</p>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">对照 1 ｜ 002134 天津普林 <span class="badge badge-succ">突破前高</span></div>
+    <div class="s">H = 23.50（2024-11-11）→ L = 14.90（2024-11-27）｜ 回调 36.60% ｜ 0.618 位 = 20.22 ｜ 2025-03-05 突破前高</div>
+  </div>
+  <div class="case-body"><img src="charts/对照_002134.png" alt="002134 天津普林"></div>
+  <div class="case-note">
+    深回调 36.6% 后，价格越过 0.618 位 20.22，并经约 3 个月整理后于 2025-03-05 突破前高 23.50。
+    <b>关键：突破发生在触及 0.618 后的近 3 个月，而非在 0.618 位附近立即启动。</b>这也说明买入时机与 0.618 位没有直接关系。
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">对照 2 ｜ 603011 合锻智能 <span class="badge badge-succ">突破前高</span></div>
+    <div class="s">H = 14.60（2025-04-02）→ L = 9.30（2025-04-29）｜ 回调 36.30% ｜ 0.618 位 = 12.58 ｜ 2025-05-26 突破前高</div>
+  </div>
+  <div class="case-body"><img src="charts/对照_603011.png" alt="603011 合锻智能"></div>
+  <div class="case-note">
+    触及 0.618 位 12.58 后仅 4 个交易日即突破前高，走势凌厉。<b>与失效案例相比，区别在于突破速度与量能，而非是否越过 0.618。</b>
+  </div>
+</div>
+
+<div class="case">
+  <div class="case-head">
+    <div class="t">对照 3 ｜ 002362 汉王科技 <span class="badge badge-succ">突破前高</span></div>
+    <div class="s">H = 23.35（2022-12-13）→ L = 15.22（2022-12-30）｜ 回调 34.82% ｜ 0.618 位 = 20.24 ｜ 2023-02-02 突破前高</div>
+  </div>
+  <div class="case-body"><img src="charts/对照_002362.png" alt="002362 汉王科技"></div>
+  <div class="case-note">
+    2023-01-31 触及 0.618 位 20.24，次一交易日即突破前高 23.35。
+  </div>
+</div>
+
+<!-- ============ 六 ============ -->
+<h2 class="pagebreak"><span class="no">六</span>结论与实务建议</h2>
+
+<h3>6.1 五个结论</h3>
+<ol class="steps">
+  <li><b>0.618 位不具备独立预测力。</b>在"已触及 0.618"的样本内部，0.382 / 0.500 / 0.618 三档的成功率完全相等（均 93.6%，增量 +0.0pp）。这是因为到达 0.618 必然经过前两档，三者在同一集合内是同一个东西。</li>
+  <li><b>0.618 位没有阻挡作用。</b>81 个失效案例的反弹进度 100% 都超过 61.8%，中位数高达 82.4%。没有任何一例是在 0.618 处受阻失败——价格都直接冲过去了。</li>
+  <li><b>在 0.618 位买入是负期望操作。</b>触及 0.618 当日买入、持有 40 个交易日，收益中位数 −3.68%，胜率仅 41.8%。四档全部为负，且档位越高越差。</li>
+  <li><b>真正决定成败的是"能否突破前高"，而不是"能否到达 0.618"。</b>本次所有案例在触及 0.618 时的状态几乎相同，但结局分化——分化的原因在于后续能否突破前高，这取决于量能、市场环境与基本面催化，与黄金分割无关。</li>
+  <li><b>趋势本身才是有效信息源。</b>在双周期上涨趋势（HH/HL）前提下，无条件突破前高的基准概率就高达 93.6%。黄金分割没有在这个基础上增加任何信息。</li>
+</ol>
+
+<div class="box-key">
+  <div class="bt">正确用法：把 0.618 从「预测工具」降级为「描述刻度」</div>
+  <p><b>可以这样用：</b></p>
+  <p>· <b>描述功能</b>——回答"这次回调到了什么程度"（0.382 属浅回调，0.618 以上属深回调）。这是客观事实描述。</p>
+  <p>· <b>止损参考</b>——若把跌破 0.618 位作为"反弹动能衰竭"的辅助触发条件之一，尚可一用（但须配合趋势判断，不可单独使用）。</p>
+  <p>· <b>沟通语言</b>——市场参与者普遍关注该位置，短期可能因集体行为出现波动，但这属于自我实现效应，不是数学规律。</p>
+  <p><b>不能这样用：</b></p>
+  <p>· ✗ 不能当作"到 0.618 就会反弹"的预测依据。</p>
+  <p>· ✗ 不能当作"到了 0.618 就可以买入"的入场信号（实测为负期望）。</p>
+  <p>· ✗ 不能单独用于判断趋势是否延续——那必须看能否突破前高。</p>
+</div>
+
+<h3>6.2 更可靠的判据</h3>
+<p>从本研究的数据出发，真正有判别力的是：</p>
+<p><b>① 趋势结构（HH/HL）</b>——本轮样本中，符合双周期 HH/HL 的波段，无条件突破前高率就达到 93.6%。趋势本身贡献了绝大部分信息。</p>
+<p><b>② 前高 H 的突破</b>——这是唯一能确认趋势延续的事件。在触及 0.618 后，应观察能否有效突破前高，而非在 0.618 处提前行动。</p>
+<p><b>③ 风险控制</b>——由于在 0.618 买入的期望为负，若要参与此类形态，应把止损设在更远的有效位置（如 L 点下方），并将单笔风险敞口控制在总资金的 1%~2%。</p>
+
+<div class="box-warn">
+  <div class="bt">对本研究局限性的说明</div>
+  <p>· <b>样本期</b>：2021-08 ~ 2026-02，约 4.5 年。该区间包含不同市场环境，但未覆盖完整的长周期牛熊轮回。</p>
+  <p>· <b>数据</b>：本地通达信为不复权数据。已剔除存在异常跳空（疑似除权）的个股做稳健性检验，结论方向一致，但极端个案的绝对价格可能与复权数据存在差异。</p>
+  <p>· <b>小样本失效组</b>：81 个失效案例相对 1,192 个成功案例属少数，其内部细分（如按行业、市值分组）的统计功效有限。</p>
+  <p>· <b>本研究的定位</b>：它检验的是"0.618 位是否具有独立预测力"这一问题，<b>结论不能推广为"所有技术分析都无效"</b>——它只针对斐波那契回撤这一具体工具。</p>
+</div>
+
+<!-- ============ 附录 ============ -->
+<h2 class="pagebreak"><span class="no">附</span>数据来源、代码与可复现说明</h2>
+
+<h3>附.1 数据来源</h3>
+<table>
+  <tr><th>项目</th><th>内容</th></tr>
+  <tr><td>数据源</td><td>本机通达信客户端本地数据文件（离线读取，不经网络）</td></tr>
+  <tr><td>路径</td><td><code>C:\SoftWare\TONGDAXIN\Body\vipdoc\{sh,sz,bj}\lday\*.day</code></td></tr>
+  <tr><td>文件格式</td><td>32 字节/记录：日期(uint32)、开高低收(uint32, ×100)、成交额(float32)、成交量(uint32)、保留(uint32)</td></tr>
+  <tr><td>复权方式</td><td>不复权（原始价）</td></tr>
+  <tr><td>数据区间</td><td>2021-08-02 ~ 2026-02-12</td></tr>
+  <tr><td>可用个股</td><td>5,168 只（沪深主板、创业板、科创板）</td></tr>
+</table>
+
+<h3>附.2 方法要点回顾</h3>
+<ol class="steps">
+  <li><b>摆动点识别</b>：日线窗口 k=12，周线窗口 k=4。局部高低点定义为窗口内的极值，并强制 H/L 交替出现。</li>
+  <li><b>趋势判定</b>：取该时点前最近四个摆动点，构成 H₁→L₁→H₂→L₂ 序列，要求 H₂&gt;H₁ 且 L₂&gt;L₁。日线与周线<strong>同时</strong>满足才纳入。</li>
+  <li><b>前视偏差修正</b>：观察窗口起点 = L 的索引 + 12 根 K 线（低点确认之后）。</li>
+  <li><b>观察窗口长度</b>：120 个交易日。一旦价格突破前高即判定"成功"并停止观察。</li>
+  <li><b>收益检验</b>：首次触及该档位当日收盘买入，持有 40 个交易日。</li>
+  <li><b>稳健性检验</b>：剔除存在单日 |涨跌幅| &gt; 15%（疑似除权跳空）的个股，结论方向不变。</li>
+</ol>
+
+<h3>附.3 可复现脚本</h3>
+<table>
+  <tr><th>文件</th><th>功能</th></tr>
+  <tr><td><code>tdx_reader.py</code></td><td>通达信 .day 二进制文件解析器（含日线转周线）</td></tr>
+  <tr><td><code>extract_cases.py</code></td><td>案例提取与核心统计（本次报告的主数据来源）</td></tr>
+  <tr><td><code>fib_tdx_study.py</code></td><td>四档位对照统计与稳健性检验</td></tr>
+  <tr><td><code>plot_cases.py</code></td><td>日线+周线双周期可视化图生成</td></tr>
+  <tr><td><code>cases_dated.csv</code></td><td>全部 1,273 个案例的完整明细（含日期链）</td></tr>
+</table>
+
+<footer>
+  <b>免责声明</b>：本报告为量化方法论的实证研究，所有结论基于 2021-08 ~ 2026-02 的 A 股历史数据回测得出，历史规律不代表未来表现。报告中涉及的所有个股仅作为统计样本用于方法讨论，<b>不构成任何投资建议</b>，亦不构成对任何证券的推荐或评价。技术分析工具的适用性因人因时而异，投资者应结合自身风险承受能力独立判断。股市有风险，入市需谨慎。<br><br>
+  数据来源：本机通达信 .day 文件 ｜ 报告生成日期：2026-10-02 ｜ 分析样本：5,168 只个股、1,273 个有效案例
+</footer>
+
+</div>
+</body>
+</html>

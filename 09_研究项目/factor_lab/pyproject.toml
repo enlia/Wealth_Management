@@ -1,0 +1,68 @@
+[project]
+name = "factor-lab"
+version = "0.1.0"
+description = "A股因子有效性检验实验室 —— 复用 alphalens/mlfinlab/vectorbt，避免重复实现"
+readme = "README.md"
+
+# ⚠️ 锁定 <3.13 的原因（实测踩坑 2026-10-03）：
+#   alphalens-reloaded → empyrical-reloaded → peewee 3.17.3
+#   peewee 3.17.3 在 Python 3.13 下构建失败（无预编译轮子且源码不兼容）
+#   peewee 3.17.3 在 3.12 下正常。alphalens 官方 classifiers 也是 3.10~3.12。
+#   这是依赖链的硬约束，不要为了升 3.13 去 patch peewee。
+requires-python = ">=3.12,<3.13"
+
+# 核心依赖说明：
+#   alphalens-reloaded  —— 因子检验事实标准（IC分析/分组分析/换手率）
+#                         ⚠️ 它要求 pandas<3.0，uv 会自动降级，这是刻意的
+#   pyarrow             —— parquet 读写，列式压缩比 CSV 小 5 倍以上
+#   pyyaml              —— 配置文件
+dependencies = [
+    "alphalens-reloaded>=0.4.6",
+    "pyarrow>=20.0.0",
+    "pyyaml>=6.0.0",
+    "scipy>=1.13.0",
+    "statsmodels>=0.14.0",
+    "matplotlib>=3.9.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
+# 注意：mlfinlab 不可用 —— 腾讯镜像 404，且新版需 Hudson&Themess 商业许可。
+# 其 deflated_sharpe_ratio 按 Bailey & López de Prado (2014) 论文公式自实现，见
+# src/factor_lab/analysis/deflated.py（公式不受版权保护，不复制 GPL 源码）
+
+[build-system]
+requires = ["uv_build>=0.12.22,<0.13.0"]
+build-backend = "uv_build"
+
+# ── 国内镜像：大包（scipy/matplotlib）走官方源极慢 ────────────
+# 实测 2026-10-03 首次索引响应：
+#   mirrors.cloud.tencent.com  0.50s  ← 默认（同地域）
+#   pypi.org                    0.83s  ← 兜底（镜像缺包时，如 mlfinlab 404）
+#   pypi.tuna.tsinghua.edu.cn  1.61s
+#   mirrors.aliyun.com         1.92s
+[[tool.uv.index]]
+name = "tencent"
+url = "https://mirrors.cloud.tencent.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "pypi-fallback"
+url = "https://pypi.org/simple"
+explicit = true
+
+[tool.uv]
+concurrent-downloads = 16
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
