@@ -152,8 +152,19 @@ def run_tear_sheet(
         raise ValueError(f"有效分位数不足（{avail}），无法计算多空组合")
     p0 = _col(periods[0])
     spread = float(qr.loc[avail[-1], p0] - qr.loc[avail[0], p0])
-    gross = spread * periods[0]                       # 折算为年化
-    net = gross - cost.round_trip * turnover_mean * cfg.quantiles
+
+    # ⚠️ 年化口径（2026-10-05 修正，勿改回）
+    #   mean_return_by_quantile 返回的是【每期平均收益】。原代码写
+    #   gross = spread * periods[0]，而 periods[0]=1，于是「年化毛收益」
+    #   实际是【每日】差值 —— 数值被低估了约 252 倍，且打印标签写着「年化」，
+    #   极易被误读成「扣成本后归零」这类错误结论。
+    #   正确做法：先把每期差值折算成年化，再扣年化成本。
+    #     年化毛   = 每期差值 × (252 / periods[0])
+    #     年化成本 = 往返费率 × 平均单期换手 × 分组数 × (252 / periods[0])
+    #   252 = A 股年交易日数近似值。
+    periods_per_year = 252.0 / periods[0]
+    gross = spread * periods_per_year
+    net = gross - cost.round_trip * turnover_mean * cfg.quantiles * periods_per_year
 
     return TearSheetResult(
         factor_name=factor_name,
