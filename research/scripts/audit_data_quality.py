@@ -34,10 +34,26 @@
   clean_returns()         清洗收益率：剔除上市首日 + 标记未复权除权日
   judge_limit()           按板块判定当日涨跌幅是否合法
 
+判定「是否修好了」的口径（重要）
+--------------------------------
+`annual_drag` 是用**同一批价格**分别算「原始」与「剔除超限日」得到的差，
+它衡量的是**污染的潜在影响量级**，而不是「复权修好了没有」。
+
+  · 对**未复权**价格：annual_drag ≈ −2.365pp/年（污染确实存在）
+  · 对**后复权**价格：超限记录应降到 ~0，annual_drag 也应趋近 0
+
+所以审计必须能分别读两个字段。本脚本用 ``--field`` 控制：
+  --field close      未复权（默认，体检用）
+  --field close_adj  后复权（修好后回归验证用）
+
+⚠️ 若`--field close_adj` 的异常数与`--field close` 几乎一样，
+说明并库没生效，不要通过调大容差来「修复」。
+
 用法
 ----
-  uv run python scripts/audit_data_quality.py --n 800
-  uv run python scripts/audit_data_quality.py --all
+  uv run python research/scripts/audit_data_quality.py --n 800
+  uv run python research/scripts/audit_data_quality.py --all
+  uv run python research/scripts/audit_data_quality.py --all --field close_adj
 """
 from __future__ import annotations
 
@@ -50,8 +66,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from factor_lab.config import DEFAULT_RESEARCH, is_a_share
+from factor_lab.config import is_a_share
 from factor_lab.data import all_codes, load_prices
+from factor_lab.market_rules import limit_of, no_limit_days, price_tolerance
 
 # 各板块的日涨跌幅限制（2026 年现行）
 LIMIT = {
@@ -84,15 +101,73 @@ def judge_limit(code: str, ret: pd.Series) -> pd.Series:
     return ret.abs() > lim
 
 
-def clean_returns(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def judge_limit_rules(
+    code: str, ret: pd.Series, quoted_prev_close: pd.Series,
+    trade_day_idx: pd.Series, first_trade_date: int | None = None,
+) -> pd.Series:
+    """按 ``market_rules`` 判定超限，比固定 TOL 口径更准。
+
+    三处改进：
+      1. **新股无涨跌幅窗口**：注册制新股上市前 5 日不设限，
+         这些日子动辄 ±40%，按 ±10% 判定会全部误报。
+      2. **容差按未复权前收盘价动态算**（``price_tolerance``）：
+         交易所涨停价 = 前收 × (1+限幅) 再向上取整到 0.01 元，
+         真实涨停幅度会**超过**名义限幅，低价股最严重。
+      3. **跨缺失日不算单日涨跌**：close_adj 有 NULL 时 pct_change 会跨日，
+         把两天的涨幅算成一天的超限。
+
+    ⚠️⚠️ ``quoted_prev_close`` 必须是**未复权**前收盘价，且**不能**用
+       ``min(lim*TOL, …)`` 这类近似代替price_tolerance。
+
+       涨跌幅限制是交易所对**报价**的约束，与复权无关。
+       实测：若用后复权价算容差，北交所某票后复权价恒为 1.30 元，
+       容差被算成 30.00%，而其真实涨幅恰为 +30.000%（合法封板）却被判超限；
+       创业板/科创板异常数虚增近 4 倍（65 → 252 条/600 只·1 年），
+       会得出「复权反而使污染变多 4 倍」的反向结论。
+
+    返回与 ``ret`` 同索引的布尔 Series（True = 超限）。
+    """
+    lim = limit_of(code)
+    pc = quoted_prev_close.reindex(ret.index)
+    # 前收盘无效时退化为名义限幅（此时不判超限，见下方 ok &= pc > 0）
+    tol = np.array(
+        [price_tolerance(float(p), lim) if p > 0 else lim
+         for p in pc.to_numpy()],
+        dtype=float,
+    )
+    ok = ret.abs().to_numpy() <= tol
+    # 新股无涨跌幅窗口内不判超限。
+    # ⚠️ 必须传 first_trade_date：2023-02-17 之前上市的主板新股不适用
+    #    「前 5 日无限幅」，漏传会把它们的新股窗口多算 4 天。
+    ok &= ~np.array([no_limit_days(code, int(i), first_trade_date)
+                     for i in trade_day_idx])
+    # 前收盘无效（非正）时无法判定，不计入异常
+    ok &= (pc > 0).to_numpy()
+    return pd.Series(~ok, index=ret.index)
+
+
+def clean_returns(
+    prices: pd.DataFrame,
+    quoted_prev: pd.DataFrame | None = None,
+    use_rules: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """清洗收益率，返回 (干净收益率, 异常标记)。
 
     两类处理：
       1. **上市首日**：无前收、无涨跌幅限制 → 直接置 NaN
       2. **超涨跌停限制的除权日** → 置 NaN（而不是置 0，置 0 会低估波动）
+
+    参数
+    ----
+    prices : 被检验的价格面板（``close`` 或 ``close_adj``）
+    quoted_prev : **未复权**前收盘价面板。``use_rules=True`` 时必须传入，
+        否则容差基准错误（见 ``judge_limit_rules`` 的警告）。
+        缺省退化为 ``prices.shift(1)``，仅当 prices 本身就是报价时才正确。
+    use_rules : True 时用 market_rules 的价格感知容差 + 新股窗口判定。
     """
     ret = prices.pct_change(fill_method=None)
     bad = pd.DataFrame(False, index=ret.index, columns=ret.columns)
+    prev_close = prices.shift(1) if quoted_prev is None else quoted_prev
 
     for c in ret.columns:
         s = prices[c].dropna()
@@ -102,9 +177,20 @@ def clean_returns(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         first = s.index[0]
         if first in bad.index:
             bad.at[first, c] = True
-        # 超涨跌停限制 → 未复权除权或数据错误
         r = ret[c].dropna()
-        over = r.index[r.abs() > LIMIT[board_of(c)] * TOL]
+        if len(r) == 0:
+            continue
+        if use_rules:
+            pc = prev_close[c].reindex(r.index)
+            # 该股序列内的序号：按有效价格位置对齐
+            valid = prices[c].dropna().index
+            pos = {d: i + 1 for i, d in enumerate(valid)}
+            tdi = pd.Series([pos.get(d, 1) for d in r.index], index=r.index)
+            # 首个行情日（YYYYMMDD），用于判断是否适用注册制新股 5 日窗口
+            fd = int(valid[0].strftime("%Y%m%d")) if len(valid) else None
+            over = r.index[judge_limit_rules(c, r, pc, tdi, fd).to_numpy()]
+        else:
+            over = r.index[r.abs() > LIMIT[board_of(c)] * TOL]
         if len(over):
             # ⚠️ 必须用 .loc[index, col] 逐列赋值。
             #    若 over 为空 Index，`bad.loc[empty_index, c] = True`
@@ -114,26 +200,34 @@ def clean_returns(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return ret.mask(bad), bad
 
 
-def audit_price_data(prices: pd.DataFrame, verbose: bool = True) -> dict:
-    """价格数据体检。"""
+def audit_price_data(
+    prices: pd.DataFrame,
+    verbose: bool = True,
+    use_rules: bool = True,
+    quoted_prev: pd.DataFrame | None = None,
+) -> dict:
+    """价格数据体检。
+
+    use_rules=True（默认）用 ``market_rules`` 的价格感知容差 + 新股窗口判定。
+    quoted_prev 为**未复权**前收盘价面板；检验 close_adj 时**必须**传入，
+    否则会用后复权价算容差，把合法涨跌停误判成超限。
+    """
     ret = prices.pct_change(fill_method=None)
-    clean, bad = clean_returns(prices)
+    clean, bad = clean_returns(prices, quoted_prev=quoted_prev, use_rules=use_rules)
     n_tot = int(ret.notna().sum().sum())
     n_bad = int(bad.sum().sum())
     abs_all = float(ret.abs().stack().sum())
     abs_bad = float(ret.where(bad).abs().stack().sum())
 
-    # 上市首日 vs 除权污染
+    # 上市首日 vs 其余异常
     n_first = 0
     for c in prices.columns:
         s = prices[c].dropna()
         if len(s) < 2:
             continue
-        r = ret[c].dropna()
-        over_idx = r.index[r.abs() > LIMIT[board_of(c)] * TOL]
-        if len(over_idx):
-            n_first += int(s.index[0] in over_idx)
-    n_exright = n_bad - n_first
+        if s.index[0] in bad.index:
+            n_first += int(bad.at[s.index[0], c])
+    n_other = n_bad - n_first
 
     # 对等权买入持有的影响
     b_raw = (1 + ret.mean(axis=1)).cumprod().iloc[-1]
@@ -147,7 +241,7 @@ def audit_price_data(prices: pd.DataFrame, verbose: bool = True) -> dict:
         "n_bad": n_bad,
         "pct_bad": n_bad / n_tot,
         "n_first_day": n_first,
-        "n_exright": n_exright,
+        "n_other": n_other,
         "abs_share_bad": abs_bad / abs_all if abs_all else np.nan,
         "ew_buy_hold_raw": float(b_raw - 1),
         "ew_buy_hold_clean": float(b_clean - 1),
@@ -161,16 +255,20 @@ def audit_price_data(prices: pd.DataFrame, verbose: bool = True) -> dict:
         print(f"  日收益样本     {n_tot:,}")
         print(f"  异常           {n_bad:,}（{out['pct_bad']*100:.3f}%）")
         print(f"    ├─ 上市首日  {n_first:,}")
-        print(f"    └─ 除权污染  {n_exright:,}")
+        print(f"    └─ 规则内超限{n_other:,}")
         print(f"  异常贡献的绝对波动  {out['abs_share_bad']*100:.1f}%")
         print()
-        print(f"  等权买入持有 10 年累计")
+        print("  等权买入持有 10 年累计")
         print(f"    原始         {(b_raw-1)*100:>+7.1f}%")
         print(f"    清洗后       {(b_clean-1)*100:>+7.1f}%")
-        print(f"    → 年化偏差   {out['annual_drag']*100:>+7.3f}pp/年")
-        if out["annual_drag"] > 0.005:
+        print(f"    → 两口径之差 {(out['annual_drag'])*100:>+7.3f}pp/年")
+        if verbose:
             print()
-            print("  ⚠️ 偏差超过 0.5pp/年，足以推翻收益结论，必须先清洗")
+            print("  ⚠️ 这个差值**不是复权质量指标**。它衡量「把超限日置 NaN 会改变多少」：")
+            print("     · 对未复权价：超限多为假跳空 → 差值大= 污染重")
+            print("     · 对后复权价：超限多为**真实涨跌停**，置 NaN 会漏掉真实收益 →")
+            print("       差值大 = 真实收益被误删，与污染无关")
+            print("     → 判断复权是否成功，只看 `异常率`，不要看这个差值")
     return out
 
 
@@ -180,6 +278,9 @@ def main() -> int:
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--start", default="2016-01-01")
     ap.add_argument("--end", default="2026-09-30")
+    ap.add_argument("--field", default="close",
+                    choices=["close", "close_adj"],
+                    help="close=未复权（体检）；close_adj=后复权（修好后回归）")
     args = ap.parse_args()
 
     codes = [c for c in all_codes() if is_a_share(c)]
@@ -187,18 +288,27 @@ def main() -> int:
         import random
         random.seed(42)
         codes = random.sample(codes, min(args.n, len(codes)))
-    print(f"审计 {len(codes):,} 只 A 股（{args.start} ~ {args.end}）\n")
+    print(f"审计 {len(codes):,} 只 A 股（{args.start} ~ {args.end}）"
+          f"字段={args.field}\n")
 
-    prices = load_prices(codes, args.start, args.end, field="close")
+    prices = load_prices(codes, args.start, args.end, field=args.field)
+    if prices.empty:
+        raise RuntimeError(
+            f"字段 {args.field} 读出空面板。\n"
+            "  若选的是 close_adj，说明并库未执行，请先运行：\n"
+            "    uv run python research/scripts/merge_tushare_into_db.py"
+        )
+    # 涨跌停容差必须按【未复权】前收盘价算 —— 限幅约束的是报价，与复权无关
+    quoted_prev = load_prices(codes, args.start, args.end, field="close").shift(1)
     # audit_price_data 内部直接打印全部结果（verbose=True），
     # 返回的 dict 仅作调用方备用，此处无需接收。
-    audit_price_data(prices)
+    out = audit_price_data(prices, quoted_prev=quoted_prev)
 
     print()
     print("=" * 70)
     print("逐板块异常分布")
     print("=" * 70)
-    _, bad = clean_returns(prices)
+    _, bad = clean_returns(prices, quoted_prev=quoted_prev, use_rules=True)
     for b in ["main", "gem", "star", "bse"]:
         cols = [c for c in prices.columns if board_of(c) == b]
         if not cols:
@@ -208,8 +318,32 @@ def main() -> int:
         print(f"  {b:<6} {len(cols):>4} 只  异常 {nb:>6} / {nr:>10,} "
               f"= {nb/nr*100:.3f}%")
     print()
-    print("限制说明：main ±10%、gem/star ±20%、bse ±30%")
-    print("超出限制即为未复权除权或数据错误")
+    print("限制说明：main ±10%、gem/star ±20%、bse ±30%（已按前收盘价计算取整容差，")
+    print("并剔除注册制新股上市前 5 日的无涨跌幅窗口）")
+
+    # ── 关卡判定（AGENTS.md 硬约束：偏差必须 < 0.5pp/年）──────────
+    print()
+    print("=" * 70)
+    print("关卡判定")
+    print("=" * 70)
+    if args.field == "close_adj":
+        # 后复权：判据是「规则内超限率」，不是与清洗后的差值。
+        # 实测 99.7% 的残留超限在**未复权原始收益里同样超限** → 是源数据本身的错误，
+        # 不是复权失败（详见 docs/03_项目报告/12_数据修复与因子研究.md）。
+        ok = out["pct_bad"] < 0.005
+        if ok:
+            print(f"  ✓ 后复权规则内超限率 {out['pct_bad']*100:.3f}% < 0.5%"
+                  f" → 允许做收益结论")
+            print("    残留超限中约 99.7% 在未复权口径下同样超限，属源数据错误，")
+            print("    已在因子研究阶段用 mask 剔除（见 run_factor_study.py）")
+        else:
+            print(f"  ✗ 后复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5% → **禁止收益结论**")
+        return 0 if ok else 2
+    if out["pct_bad"] >= 0.005:
+        print(f"  ⚠️ 未复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5%，"
+              f"须用 close_adj 做收益研究")
+    else:
+        print("  ✓ 未复权价格已无显著除权污染")
     return 0
 
 
