@@ -165,3 +165,53 @@ uv run python scripts/probe_tushare.py --token 你的token
 
 *数据来源：Tushare 官方权限页 document/1?doc_id=108（2026-10-05 实测抓取）+ MCP 实际调用返回*
 *本报告不构成投资建议。*
+
+---
+
+## 六、【2026-10-05 22:35 更新】权限已开通，全量实测通过
+
+用户更新 MCP 后重新实测，**四个 P0 接口全部打通**，
+确认账号已开到 **2000 积分档**。
+
+| 接口 | 状态 | 实测返回内容 |
+|---|---|---|
+| `adj_factor` | ✅ | 茅台 2024-01-02~10 每日 `adj_factor=7.8576`；平安银行 2015-12 起 `85.994` → **历史可回溯至 2015** |
+| `stock_basic(D)` | ✅ | 完整退市股名单：退市创兴、退锦港、乐视退、PT金田A… 最早上市日 1990-12-01 |
+| `index_classify` | ✅ | 申万 L1 全部 **31 个一级行业**（801010 农林牧渔 ~ 801980 美容护理） |
+| `daily_basic` | ✅ | 茅台 2024-01-08~10：pe=32.88/ pb=10.64 / total_mv=2.06e11 / turnover_rate=0.1381% 等 17 字段 |
+| `fina_indicator` | ✅ | 茅台 20231231 期：**ann_date=20240403** + 130 余字段 |
+| `index_weight` | ✅ | 沪深300 20240131 完整 **298 只**成分 + 权重（茅台 6.191%、平安 2.678%） |
+
+### 最有价值的发现：`fina_indicator` 自带 `ann_date`
+
+实测茅台 2023 年报返回 `ann_date=20240403`——**这是财报的真实披露日**。
+
+本项目此前是用「法定披露截止日」推算的（年报次年 4/30 等），
+存在最多 **2.5 个月**的偏差。有了 `ann_date` 可把财务因子的前视偏差彻底消除。
+
+**额外收获的字段**（本项目原先没有）：
+- `roe_dt` 扣非 ROE、`roic` 投入资本回报率、`roe_waa` 加权平均 ROE
+- `dt_netprofit_yoy` 扣非净利润同比、`netprofit_yoy` 净利润同比
+- `debt_to_assets` 资产负债率、`grossprofit_margin` 销售毛利率
+- `q_roe` 单季 ROE（可做单季景气度因子）
+
+### 参数格式坑
+MCP 的 `fields` / `l1_code` 在 schema 里声明为 array，
+但传单个字符串会报「must be array」——实际只接受字符串单值。
+**建议：省略 `fields`，用默认字段即可**（默认已包含全部关键字段）。
+
+### 数据补全时间预算（不变）
+下载 22,374 次调用 ≈ 112 分钟（Tushare 限频 200 次/分）
++ 清洗 25 分钟 + 重跑检验 58 分钟 = **约 3.5 小时**
+
+**建议分两阶段**：
+```bash
+# 阶段一（1 小时）：只拉复权因子 + 行业分类 → 解决 90% 缺陷
+uv run python scripts/fetch_tushare_supplement.py --adj-factor-only
+
+# 阶段二（1.5 小时）：补 daily_basic + 退市股
+uv run python scripts/fetch_tushare_supplement.py --all
+```
+
+⚠️ 阶段一完成后**必须**先跑 `audit_data_quality.py --all`，
+确认偏差 < 0.5pp/年，才能继续。
