@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -147,19 +148,45 @@ YI_TO_WAN = 1e4                # 亿元 → 万元的乘数
 
 
 def to_wan(yi_value):
-    """亿元 → 万元。None / NaN 透传。
+    """亿元 → 万元。
 
     用于把通达信 universe.csv 的「总市值亿」字段并入统一口径。
+
+    ⚠️ 无法解析的非空输入**一律抛错，不静默转 None**
+    （ENGINEERING.md 第四节：禁止静默 fallback）。
+    静默丢市值会让市值因子失真而不报错 ——
+    实测 `universe.csv` 里 `'15,733.8'`（Excel 千分位导出，很常见）
+    会因`float()` 失败被吞成 NULL，整批市值静默丢失。
+
+    合法透传：None / 空串 / NaN → None（表示「无数据」，不是「转换失败」）。
     """
     if yi_value is None:
         return None
-    try:
-        import math
-        if math.isnan(float(yi_value)):
+
+    # 字符串先清洗：容忍千分位与首尾空格
+    if isinstance(yi_value, str):
+        yi_value = yi_value.strip().replace(",", "")
+        if not yi_value:
             return None
-    except (TypeError, ValueError):
+
+    try:
+        v = float(yi_value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"市值字段无法解析为数字：{yi_value!r}（类型 {type(yi_value).__name__}）\n"
+            f"  可能原因：混入了非数值文本、或千分位格式未被正确处理。\n"
+            f"  处理：修正源数据后重跑，不要让市值静默变NULL —— "
+            f"市值因子会失真但不报错。"
+        ) from e
+
+    if math.isnan(v):
         return None
-    return float(yi_value) * YI_TO_WAN
+    if math.isinf(v):
+        raise ValueError(
+            f"市值字段为无穷值：{yi_value!r}\n"
+            f"  源数据异常，请检查 universe.csv 是否混入 inf 或除零结果。"
+        )
+    return v * YI_TO_WAN
 
 
 
