@@ -27,6 +27,10 @@ import os
 import sys
 import time
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from factor_lab.config import env_get  # noqa: E402
 
 ENDPOINT = "http://api.tushare.pro"
 
@@ -102,14 +106,16 @@ def main() -> int:
     ap.add_argument("--all", action="store_true", help="测全部候选接口")
     args = ap.parse_args()
 
-    token = args.token or os.environ.get("TUSHARE_TOKEN")
+    token = args.token or env_get("TUSHARE_TOKEN")
     if not token:
         print("=" * 78)
         print("缺少 token")
         print("=" * 78)
         print("  获取方式：登录 tushare.pro →右上角头像→ 用户中心 → 接口TOKEN")
-        print("  然后：export TUSHARE_TOKEN=你的token")
-        print("        或：uv run python scripts/probe_tushare.py --token 你的token")
+        print("  配置方式：把 token 填入项目根的 .env（参考 .env.example）")
+        print("            .env 已被 .gitignore 排除，不会误提交")
+        print("  临时覆盖：TUSHARE_TOKEN=xxx uv run python ...")
+        print("            或 --token 参数")
         return 1
 
     print("=" * 78)

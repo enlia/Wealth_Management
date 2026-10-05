@@ -17,9 +17,15 @@ cp .env.example .env
 
 # 3. 自检：验证数据链路与代码导入
 uv run python research/scripts/smoke_test.py
+uv run python research/scripts/verify_imports.py   # 批量验证 33 个脚本
 ```
 
 Python 版本锁定 `>=3.12,<3.13`——依赖链硬约束，见 `pyproject.toml` 注释。
+
+**关于 `.env`**：代码通过 `factor_lab.config.env_get()` 读取，优先级为
+真实环境变量 > `.env` 文件 > MCP 配置自动发现。所以 `.env` 配好即生效，
+不需要额外 export；`.env` 已被 `.gitignore` 排除，token 永不进入版本控制
+（已验证：全历史 `.env` object 数为 0）。
 
 ---
 

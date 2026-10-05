@@ -33,7 +33,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from factor_lab.config import DB_PATH, is_a_share
+from factor_lab.config import DB_PATH, env_get, is_a_share
 
 ENDPOINT = "http://api.tushare.pro"
 OUT_DIR = Path(__file__).resolve().parents[2] / "runtime" / "tushare"
@@ -140,9 +140,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="只拉前N 只（试跑）")
     args = ap.parse_args()
 
-    token = args.token or os.environ.get("TUSHARE_TOKEN")
+    token = args.token or env_get("TUSHARE_TOKEN")
     if not token:
-        print("缺少 token：export TUSHARE_TOKEN=xxx")
+        print("缺少 token。请在项目根的 .env 中设置 TUSHARE_TOKEN=<你的token>")
+        print("（参考 .env.example；.env 已被 .gitignore 排除，不会误提交）")
         return 1
 
     import urllib.request  # noqa: F401  （call 内部用）
