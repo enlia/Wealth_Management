@@ -30,12 +30,16 @@
 ### 强制流程（无例外）
 
 ```
-1. 从 main 拉新分支       git switch -c feat-<简述>
+1. 更新并拉新分支
+   git fetch origin && git switch main && git pull
+   git switch -c feat-<简述>
 2. 在分支上开发 + 小步提交
-3. 派子 agent 做 review明确要求它按本文档 + PITFALLS 逐条核对
+3. 派子 agent 做 review  明确要求它按本文档 + PITFALLS 逐条核对
 4. review 通过后推送      git push -u origin <分支>
 5. 在 GitHub 上开 PR      https://github.com/enlia/Wealth_Management/compare/main...<分支>
-6. PR 合并到 main        （网页点 Merge，或 gh pr merge）
+6. PR 合并到 main        gh pr merge <PR号> --squash
+   ⚠️ 本机 gh.exe 在C:/Program Files/GitHub CLI/，可能不在 PATH：
+      "C:/Program Files/GitHub CLI/gh.exe" pr merge 1 --squash
 7. 保留分支              ⚠️ 合并后不删除，保留作历史记录
 ```
 
@@ -63,23 +67,34 @@
 
 ### 合并后保留分支的依据
 
-GitHub **对分支数量无强制上限**（官方推荐 5,000 个以内，
-超出会导致 fetch 变慢，不影响正常使用）。
-StackOverflow 与 GitHub 官方文档的结论：
+GitHub **不对分支数量设强制上限**，但官方文档在Repository limits 中
+**建议** 5,000 个以内，超出会拖慢 fetch，极端情况可能触发性能降级。
+分清三个来源，别混为一谈：
 
-- Git 本身：分支就是一个含 40 字节 SHA 的引用文件，磁盘占用约 4KB
-- GitHub：无硬限制，官方仅「建议 5,000 以内」以保证性能
-- 性能软上限：建议 1,000 个 ref 以内
+| 来源 | 说法 |
+|---|---|
+| GitHub 官方文档 | 建议 5,000 以内（**推荐**，非强制） |
+| Git 本身 | 分支是含 40 字节 SHA 的引用文件，磁盘约 4KB，无任何硬限制 |
+| StackOverflow 社区 | 性能软上限建议 1,000 个 ref 以内（**社区建议**，比官方保守） |
 
 因此**保留已合并分支不会触及任何限制**，反而有可追溯价值。
-若日后分支数逼近数百，可批量归档：
+若日后分支数逼近数百，可批量归档。
+
+⚠️ **判据必须是内容比对，不能用 `git branch --merged`**：
 
 ```bash
-# 列出所有已合并分支（确认无误后再考虑清理）
-git branch --merged main --format='%(refname:short)'
+# ❌ 错：squash 合并下会漏报已合并分支
+git branch --merged main
+# 实测：feat-pr-workflow 是 squash 合并的，
+#       但它不在 --merged 输出里（因为它的 commit 不在 main 历史中）
+
+# ✅ 对：内容比对，与合并方式无关
+git diff --quiet main <分支> && echo "内容已并入 main"
 ```
 
-⚠️ 任何清理操作前先确认分支已合并、内容已进入 main。
+**原理**：squash 合并会把整个分支压成一个新commit，
+分支原有 commit 不在 main 历史里，所以 `--merged`（基于 commit 可达性）
+判断不出来。而 `git diff --quiet` 比的是文件内容，与合并方式无关。
 
 **Review 子 agent 必须被明确要求做两件事**：
 1. 按本文档逐条核对
