@@ -132,6 +132,36 @@ TDX_VIPDOC = Path(env_get("TDX_VIPDOC") or next(
 ))
 
 
+# ── 单位约定（2026-10-06 统一）──────────────────────────────
+# ⚠️ 量纲错误会彻底污染因子，且不报错，只能靠约定与断言防住。
+#
+# 本项目市值单位统一为**万元**（与 Tushare 的 total_mv / circ_mv 一致）：
+#   1 万万元 = 1 亿元
+#
+# 实测依据（茅台 600519.SH，2026-09-30）：
+#   Tushare total_mv= 157,337,770 万元
+#   ÷ total_share 12.5008 亿股 = 1,258.62 元/股 = 当日收盘价✓
+#   若误当亿元：157,337,770 × 1e4 → 差 1 万倍，量级完全错误
+MARKET_CAP_UNIT = "万元"
+YI_TO_WAN = 1e4                # 亿元 → 万元的乘数
+
+
+def to_wan(yi_value):
+    """亿元 → 万元。None / NaN 透传。
+
+    用于把通达信 universe.csv 的「总市值亿」字段并入统一口径。
+    """
+    if yi_value is None:
+        return None
+    try:
+        import math
+        if math.isnan(float(yi_value)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return float(yi_value) * YI_TO_WAN
+
+
 
 # ── 交易成本假设（A股实际水平）────────────────────────────────
 @dataclass(frozen=True)
