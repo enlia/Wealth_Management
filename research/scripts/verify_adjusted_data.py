@@ -49,7 +49,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from factor_lab.config import DB_PATH  # noqa: E402
+from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+from factor_lab.data import all_codes  # noqa: E402
 from factor_lab.data.adjust import AdjustedPriceBuilder  # noqa: E402
 from factor_lab.market_rules import (  # noqa: E402
     board_cn,
@@ -66,22 +67,21 @@ TICK = 0.01
 def pick_codes(con: sqlite3.Connection, n_total: int, seed: int) -> list[str]:
     """分层抽样：按板块比例抽，避免 bj 排最前时全抽北交所（见 PITFALLS）。
 
-    ⚠️ 必须排除指数与板块：它们的 adj_factor 不在 Tushare 因子表里
-       （Tushare 只覆盖 A 股个股），混入会让「无因子」比例虚高。
+    ⚠️ 必须用 `is_a_share()` 过滤，不能用 SQL 的 `code LIKE 'sz3%'`。
+       sz3% 会把指数（sz399003、sz399356 等）一起抽进来 ——
+       它们的 adj_factor 不在 Tushare 因子表里。
+       实测 149 只样本里有 1 只指数，它本次恰好因「无复权因子」
+       被 last_missing 剔除而侥幸无害 —— 那是巧合，不是设计。
     """
-    all_codes = [
-        r[0] for r in con.execute(
-            "SELECT DISTINCT code FROM bar_daily WHERE code LIKE 'sh6%' "
-            "OR code LIKE 'sz0%' OR code LIKE 'sz3%' OR code LIKE 'bj%'")
-    ]
+    universe = [c for c in all_codes() if is_a_share(c)]
     by_board: dict[str, list[str]] = {}
-    for c in all_codes:
+    for c in universe:
         by_board.setdefault(board_of(c), []).append(c)
 
     rng = np.random.default_rng(seed)
     picked: list[str] = []
     for _b, lst in sorted(by_board.items()):
-        n = max(1, round(n_total * len(lst) / len(all_codes)))
+        n = max(1, round(n_total * len(lst) / len(universe)))
         picked += [lst[i] for i in rng.choice(len(lst), size=min(n, len(lst)), replace=False)]
     return sorted(picked)
 

@@ -29,17 +29,17 @@ Tushare 的 adj_factor 是**前复权因子**（起点≈1），
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from factor_lab.config import WORKSPACE  # noqa: E402
+# ⚠️ 库代码不写 sys.path.insert（ENGINEERING 零节明文禁止）。
+#    factor_lab 是 pyproject 声明的可安装包（uv_build），uv run 下自动可导入。
+#    research/ 下的脚本仍需 sys.path.insert，那是脚本入口的既有约定。
+from factor_lab.config import WORKSPACE
 
 ADJ_FACTOR_FILE = WORKSPACE / "runtime" / "tushare" / "adj_factor.parquet"
-CODE_FMT = 8# sh600519 长度
 
 
 def ts_to_local(ts_code: str) -> str:
@@ -169,7 +169,16 @@ class AdjustedPriceBuilder:
 def verify_adjustment(
     builder: AdjustedPriceBuilder, db_path: Path, samples: int = 5
 ) -> pd.DataFrame:
-    """抽样验证复权效果：除权日的单日收益应回到 ±10% 以内。"""
+    """抽样定位除权日：找出单日跌幅最大的记录，看复权后是否回到合理区间。
+
+    ⚠️ **阈值口径已废弃**，仅保留「定位除权日」的思路。
+       这里用固定 -10.5% 找候选，而正确判据必须走
+       `market_rules.price_tolerance(prev_close, limit_of(code))`
+       —— 低价股真实封板涨停会达到 -10.15%，会被本函数误当成除权日。
+
+    正式验证请用 `research/scripts/verify_adjusted_data.py`，
+    它含动态容差 + 封板交叉验证 + 注册制新股窗口三重判据。
+    """
     import sqlite3
 
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
