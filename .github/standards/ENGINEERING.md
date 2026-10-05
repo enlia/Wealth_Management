@@ -275,11 +275,12 @@ if data is None:
 | 行数 ≤ 500 | AGENTS.md 曾 579 行 | ✅ **CI** |
 | git 作者身份 | 40 个提交被工具身份污染 | ✅ **CI** |
 | F841 未使用变量 | `adj_i` 建索引却从未查询 | ✅ **CI** |
+| `pytest tests/` | `testpaths` 指向不存在的目录，「理论最大容差」文档数字与代码差 0.47~2.3pp | ✅ **CI** |
 | `pre-commit` | git 身份（同上，提交前即时拦） | ✅ 本地 hook |
 | `audit_data_quality.py` | 2.33pp 年化偏差 | ❌ 手动（需数据库） |
 | `check_units.py` | 市值量纲差 1 万倍 | ❌ 手动（需 Tushare 对比） |
 
-**CI 配置**：`.github/workflows/ci.yml`，4 项检查，`main` 分支 push 与 PR 均触发。
+**CI 配置**：`.github/workflows/ci.yml`，5 项检查，`main` 分支 push 与 PR 均触发。
 
 **为什么有些检查不进 CI**：`data/` 与 `runtime/` 都在 .gitignore，
 CI 上没有 `market.db`、没有 Tushare 数据。硬跑必然失败，
