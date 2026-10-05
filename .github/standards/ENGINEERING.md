@@ -37,9 +37,14 @@
 3. 派子 agent 做 review  明确要求它按本文档 + PITFALLS 逐条核对
 4. review 通过后推送      git push -u origin <分支>
 5. 在 GitHub 上开 PR      https://github.com/enlia/Wealth_Management/compare/main...<分支>
-6. PR 合并到 main        gh pr merge <PR号> --squash
-   ⚠️ 本机 gh.exe 在C:/Program Files/GitHub CLI/，可能不在 PATH：
-      "C:/Program Files/GitHub CLI/gh.exe" pr merge 1 --squash
+6. PR 合并到 main        gh pr merge <PR号> --merge
+   ⚠️ **禁止 --squash**（用户 2026-10-06 明确要求）：
+      squash 会把整个分支压成1 个提交，main 历史变成一条直线，
+      看不到「从哪拉分支、逐步改了什么」，Git Graph 也不画分叉。
+      --merge（--no-ff 语义）会生成 merge commit，
+      分支的每个提交都留在 main 历史中，可回溯全过程。
+   ⚠️ 本机 gh.exe 在 C:/Program Files/GitHub CLI/，可能不在 PATH：
+      "C:/Program Files/GitHub CLI/gh.exe" pr merge 1 --merge
 7. 保留分支              ⚠️ 合并后不删除，保留作历史记录
 ```
 
@@ -63,6 +68,7 @@
 | **分支命名** | `feat-` `fix-` `refactor-` `docs-` + 简述，英文小写连字符 |
 | **合并前必须有 review 结论** | 记录 review 发现了什么、改了什么 |
 | **一个分支一件事** | 不把无关改动混进同一分支 |
+| **合并方式用 `--merge`** | **禁止 `--squash`**。squash 丢失分支过程，Git Graph 无分叉 |
 | **合并后保留分支** | 不执行 `git branch -d` 与 `git push origin --delete` |
 
 ### 合并后保留分支的依据
