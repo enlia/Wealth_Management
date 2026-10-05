@@ -1,0 +1,439 @@
+# 技术踩坑记录（PITFALLS）
+
+> 建立：2026-10-06（从 AGENTS.md 拆出，统一编号 P1~P18）
+> 内容：全部为**本项目真实踩过的坑**，不是通用最佳实践。
+> 每条标注日期与实证数据，review 时应逐条核对。
+
+## 快速索引
+
+| 编号 | 主题 | 性质 |
+|---|---|---|
+| P1 | Python 环境管理 | ⚠️ 易踩坑 |
+| P2 | alphalens-reloaded 0.4.6 API 实测坑 | ⚠️ 易踩坑 |
+| P3 | pandas 2.x 的 stack 层级顺序会变 | ⚠️ 易踩坑 |
+| P4 | 目录重组后的路径规则 | ⚠️ 易踩坑 |
+| P5 | Tushare 接口的静默失败 | ⚠️ 易踩坑 |
+| P6 | 批量拉取优先 | ⚠️ 易踩坑 |
+| P7 | 限频导致实际耗时是接口响应时间的 2.5 倍 | ⚠️ 易踩坑 |
+| P8 | 探测结果以实测为准，不以文档为准 | ⚠️ 易踩坑 |
+| P9 | Git 提交身份 | ⚠️ 易踩坑 |
+| P10 | 单位与年化口径：三个会导致结论完全反转的错误 | 🔴 **结论反转**：年化被低估 252 倍 |
+| P11 | 性能：不要单线程跑全市场 | ⚠️ 易踩坑 |
+| P12 | pandas 2.3.3 构造器行为 | ⚠️ 易踩坑 |
+| P13 | 加因子前必须验证「稀释效应」 | ⚠️ 易踩坑 |
+| P14 | 绩效声明四要素 | ⚠️ 易踩坑 |
+| P15 | 高 IC 等于高换手 | 🔴 **结论反转**：ICIR 最高但净收益 −9.21% |
+| P16 | pandas 分组与排名方向 | 🔴 **结论反转**：回测不报错结果全错 |
+| P17 | 回测前必做数据质量审计 | 🔴 **结论反转**：2.33pp 年化偏差 |
+| P18 | pandas 广播陷阱：`bad.loc[empty_index, col] = True` | 🔴 **结论反转**：异常率算成 100%（真实 0.24%） |
+
+---
+
+### P1 Python 环境管理（强制用 uv，不要用 venv+pip）
+
+本项目用 **uv** 管理环境（**项目根**），**已踩过的坑**：
+
+| 坑 | 现象 | 结论 |
+|---|---|---|
+| **peewee 不支持 3.13** | `alphalens-reloaded → empyrical-reloaded → peewee 3.17.3` 在 Python 3.13 下构建失败 | **锁定 Python 3.12**（`uv python pin 3.12`），alphalens 官方 classifiers 也是 3.10~3.12。**不要为了升 3.13 去 patch peewee** |
+| **官方源装大包极慢** | `uv sync` 挂 5 分 46 秒无输出 | **配国内镜像**，`pyproject.toml` 里 `[[tool.uv.index]]` 指向 `mirrors.cloud.tencent.com`（实测 0.50s vs 官方 0.83s），同步降到 **13 秒** |
+| **镜像缺包** | `mlfinlab` 在腾讯镜像 **404**，官方 PyPI 有 | 已配 `pypi-fallback` 索引（`explicit = true`）兜底 |
+| **mlfinlab 实际不可用** | 新版需 Hudson & Thames **商业许可** | 其 `deflated_sharpe_ratio` 按 **Bailey & López de Prado (2014) 论文公式**自实现（公式不受版权保护，**不复制 GPL 源码**） |
+
+
+
+---
+
+### P2 alphalens-reloaded 0.4.6 API 实测坑（全部由 review 流程发现）
+
+这个库的文档与实际行为有多处不符，**凭记忆写必踩坑**：
+
+| 坑 | 症状 | 正确用法 |
+|---|---|---|
+| **factor 的 MultiIndex 顺序** | 报 `'Index' object has no attribute 'tz'` | 必须是 **(date=level0, asset=level1)**，传反就崩 |
+| **period 列名是字符串** | `qr.loc[1, 1]` → KeyError: 1 | 列名是 `'1D'`/`'5D'`，用 `f"{p}D"` |
+| **`mean_return_by_quantile` 返回元组** | `'tuple' object has no attribute 'xs'` | 解包 `qr, std_err = ...` |
+| **`quantile_turnover` 需逐分组调用** | 传 `quantiles=` → TypeError | 签名是 `(quantile_factor, quantile, period)`，用字典 comprehension 循环 |
+| **`factor_information_coefficient` 返回每日 IC** | 直接取 mean 会得到 0 | 需自行聚合 mean/std/IR/t-stat |
+| **`demeaned=True`（默认）会按日去均值** | 丢失因子绝对值信息 | 动量类设 `demeaned=False` |
+| **`zero_aware=True` 导致分位编号错乱** | `compute_mean_returns_spread` 报 Index 必须 MultiIndex | 动量/反转类必须 `False`；离散取值因子（hhhl）才用 `True` |
+| **`compute_mean_returns_spread` 依赖特定 index 结构** | 各种变体下易崩 | 直接 `qr.loc[Q] - qr.loc[1]`，更可控 |
+
+**正确做法**：先 `inspect.signature()` 看清签名，再跑一次探针脚本打印返回类型，最后才写适配层。不要凭直觉试。
+
+
+
+---
+
+### P3 pandas 2.x 的 stack 层级顺序会变
+
+`DataFrame.stack()` 在 pandas 2.x 得到 `(index, column)` 顺序，与旧版相反。构造 MultiIndex **一律用 `pd.MultiIndex.from_arrays`**，不要用 stack 后改 names。
+
+常用命令（**项目根执行**，uv 项目根已提升到仓库根）：
+```bash
+cd Wealth_Management        # 任何子目录都行，不必再往下钻
+uv sync                      # 同步依赖（走镜像，~13s）
+uv run python -c "..."       # 用项目环境执行
+uv add <包># 加依赖
+```
+
+
+
+---
+
+### P4 目录重组后的路径规则（2026-10-05，勿改回）
+
+旧结构 `09_研究项目/factor_lab/scripts/` 下的脚本用
+`Path(__file__).parent.parent` 上溯两级取 `src/` 与 `out/`。
+搬到`research/scripts/` 后上溯两级只能到仓库根的中层，**30+ 处全部失效**。
+
+现在统一为：
+```python
+# 脚本在 research/scripts/xxx.py，parents[2] 才是仓库根
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+OUT = Path(__file__).resolve().parents[2] / "runtime"
+```
+
+**更优先的做法**：直接 `from factor_lab.config import DB_PATH, OUTPUT_DIR`，
+不要自己拼路径。`config.py` 已实现三级发现（`WM_ROOT` 环境变量 →
+含 `.git` 的祖先目录 → `parents[2]` 兜底），任何位置都能正确解析。
+
+⚠️ **禁止在代码里硬编码绝对路径**。曾因
+`WORKSPACE = Path(r"C:\Documentation\Wealth_Management")` 导致项目无法
+搬到第二台电脑——而同步到另一台机器是明确的项目需求。
+
+
+
+---
+
+### P5 Tushare 接口的静默失败（2026-10-05 实测，最容易再踩）
+
+**接口返回 0 行 ≠ 接口不可用。** 最危险的一种失败：参数传错时
+Tushare 既不报错也不返回错误信息，只给一个空表。
+
+实测案例：
+```
+fina_indicator  {'period': '20240630'}   →     0 行   ← 静默失败
+fina_indicator  {'ts_code': '600519.SH'} →   100 行   ✓ 正确用法
+```
+三大报表（income / balancesheet / cashflow / fina_indicator /
+fina_mainbz / forecast）**全部只支持 `ts_code` 逐只拉**，用 `period` 会静默返空。
+
+**→ 强制规则：任何 Tushare 接口，第一次用必须先试 3~4 种参数组合，
+确认哪种真正返回数据，再写进脚本。不能照抄文档示例。**
+
+
+
+---
+
+### P6 批量拉取优先（实测请求数可差 100 倍）
+
+| 接口类型 | 正确方式 | 单次返回 | 用错方式的后果 |
+|---|---|---|---|
+| 日频类（daily_basic / moneyflow / stk_limit） | **按交易日** | 5,561 行 / 0.4s | 按股票拉多花 2 倍请求 |
+| 可按报告期的（stk_holdernumber / pledge_stat / express） | **按 period/quarter** | 5,500 行 | 按股票拉多花 100 倍请求 |
+| 三大报表 | 只能按 `ts_code` | 100 行/次 | 无替代 |
+
+**判断方法**：先测 `{'period': ...}` 返回多少行；为 0 就立刻改按 `ts_code`。
+
+
+
+---
+
+### P7 限频导致实际耗时是接口响应时间的 2.5 倍
+
+限频 180 次/分钟 → 每请求强制间隔 0.33 秒。
+实测按股票拉 20 只耗时 10.7 秒 = 0.52 秒/只。
+**预估耗时时用 0.52s/次，不是接口响应时间**，否则会低估一半以上。
+
+
+
+---
+
+### P8 探测结果以实测为准，不以文档为准
+
+2000 积分实测 **23/27 个接口可用**，其中 6 个官方文档标注高门槛的
+（forecast / express / fina_mainbz / report_rc / stk_holdernumber / pledge_stat）
+实际都能取到——**文档的保守标注低估了实际权限**。
+
+不可用 4 个：`suspend_d`（停复牌）、`top_list`（龙虎榜）、
+`bak_daily`、`cyq_perf`（筹码分布，需 5000 积分）。
+
+完整实测报告：`docs/03_项目报告/11_Tushare2000积分可用能力实测.md`
+探测脚本：`research/scripts/probe_all_interfaces.py`
+补全脚本：`research/scripts/fetch_all_tushare.py`
+
+
+
+---
+
+### P9 Git 提交身份（强制，勿改回）
+
+本项目所有提交必须是：
+```
+user.name  = enlia
+user.email = 2020621056@qq.com
+```
+
+**为什么强制**：本项目 40 个提交曾全部被标记为 `WorkBuddy <workbuddy@local>`
+——那是工具默认身份，不是项目所有者。GitHub 会据此统计贡献归属，
+错误身份会让私有仓库的贡献图归到不存在的账号上。
+
+**双重保障**：
+1. `.git/config` 用 `--local` 作用域锁定（不会被全局配置或其他工具覆盖）
+2. `.git/hooks/pre-commit` 每次提交前校验，身份不对直接拒绝提交
+
+⚠️ **Windows PowerShell 下的坑**：`git filter-branch` 无法工作——
+它依赖的 `git-sh-setup`、`cat` 等 shell 命令在该环境下报
+"command not found"。已改用 `research/scripts/rewrite_authors.py`
+（纯 Python 操作 fast-export/fast-import 流，跨平台可靠）。
+
+⚠️ **重写历史时的致命细节**：`git fast-export` **绝不能加 `--no-data`**——
+那会丢弃文件内容，fast-import 重建出的提交树会变空，等于删掉整个仓库。
+必须完整导出（含文件内容）。本项目 3.4M 仓库完整导出无压力。
+
+**若需重写作者**：
+```bash
+git branch backup-before-author-fix    # 先备份
+git tag    backup-before-author-fix
+uv run python research/scripts/rewrite_authors.py \
+  --old-name WorkBuddy --old-email workbuddy@local \
+  --new-name enlia --new-email 2020621056@qq.com --dry-run
+# 确认后去掉 --dry-run，再 git push --force-with-lease
+```
+
+---
+
+
+
+---
+
+### P10 单位与年化口径：三个会导致结论完全反转的错误（2026-10-05 新增）
+
+
+这一节的每一条都真实发生过，且都造成了「方向性错误」的结论，不是精度问题。
+
+**（1）年化口径：被低估 252 倍**
+`alphalens.mean_return_by_quantile` 返回的是**每期**平均收益。
+早期代码写 `gross = spread * periods[0]`，而 `periods[0] = 1`，
+于是打印成「年化毛收益」的值实际是**每日**差值。
+正确：`gross = spread * (252 / periods[0])`。
+实测影响：bp 的「年化净收益」从 0.0% 变成 **+3.2%**——
+即曾据此错误地写出「扣成本后归零」的结论。
+
+**（2）财务数据披露延迟不能用固定天数**
+业绩报表只有报告期。统一用「报告期 + 45 天」对 Q1/Q3尚可，
+但**对年报提前 2.5 个月**（12-31+45=2/14，而法定截止日是次年 4/30）、
+**对半年报提前 17 天**。必须按报告期类型分别取法定截止日：
+03-31→04-30、06-30→08-31、09-30→10-31、12-31→次年 04-30。
+见 `build_financial_panel.py: earliest_available_date()`。
+
+**（3）中性化在 A 股不能用「分组去均值」**
+A 股行业标签多、每行业股票少，「行业 × 市值分位」的格子往往只有 **2 只**股票。
+组内去均值会把这 2 只全压成 0.0；加最小组数阈值保护后，
+阈值又把所有格子都保护掉 → **中性化退化成恒等变换**。
+⚠️ 最危险的是：此时输出结果与原始因子**一字不差**，
+极易被误读为「中性化不影响结论」。实测 `changed frac == 0.0` 才发现。
+正解：**逐日截面 OLS 残差（Barra 式）**
+`f_t = a + b·log(市值)_t + Σ γ_c·行业哑变量_c + ε_t`，取 ε。
+对行业完全控制、对市值线性控制，不依赖格子样本量。
+实现见 `run_financial_study.py: neutralize()`。
+
+**（4）分层抽样，不要用 `codes[:n]`**
+代码排序下 `bj4xxxxx`（北交所）排在最前，`codes[:200]` 抽出来全是北交所，
+与财务面板交集为 0 而空跑。必须按 sh/sz/bj 分层抽样（`pick_sample()`）。
+
+
+
+---
+
+### P11 性能：不要单线程跑全市场（2026-10-05 新增）
+
+
+本机 8 物理核 / 16 逻辑核 / 13.9 GB。因子检验的主要瓶颈是
+「逐交易日做截面回归」，2,551 天串行会跑到 20 分钟以上。
+
+- `neutralize` 已按日拆分 + joblib **线程池**并行（`n_jobs = cpu/2 = 8`）
+- **用线程池不用进程池**：每日任务是小矩阵 `lstsq`，numpy 释放 GIL；
+  进程池还要序列化 1,000 万行数据，更慢更占内存
+- 实测：2,724,494 行，串行 27.6s → 并行 8.8s（**3.14x**，结果逐元素一致）
+- 纯函数结果必须**缓存**：早期版本主循环与子区间循环各算一遍，重复 2 倍耗时
+
+通用原则：**先用小样本 profile 找瓶颈，再决定并行度**；不要凭直觉加进程。
+
+---
+
+
+
+---
+
+### P12 pandas 2.3.3 构造器行为（2026-10-05 新增，三个都实际踩过）
+
+
+1. **`pd.DataFrame(dict_of_2D_frames)` 会抛**
+   `ValueError: If using all scalar values, you must pass an index`，
+   **即使所有 frame 形状完全一致也一样**。该版本的构造器对「dict 的值是
+   DataFrame」这条路径的处理与直觉不同。
+   ⚠️ 极易误判为「索引没对齐」而走上错误的调试方向。
+   正解：逐日构造 `{date: {asset: value}}` 再 `pd.DataFrame()`，方向明确无歧义。
+
+2. **`stack` → `unstack(level=0)` 的方向极易搞反**，会得到没有 `.tz` 的
+   普通 Index，让 alphalens 的 `compute_forward_returns` 报
+   `'Index' object has no attribute 'tz'`。
+   → 涉及 alphalens 输入时，先 `print(df.index.names)` 确认。
+
+3. **DataFrame 没有 `broadcast_to`**（那是 numpy 的）。把 (date, factor)
+   的权重广播到 (date, asset, factor) 要用 `np.vstack([w] * n_rows)`。
+
+
+
+---
+
+### P13 加因子前必须验证「稀释效应」（2026-10-05 新增，最重要的一条方法论）
+
+
+**实测发现**：因子集从 `{bp, cf_quality}` 扩大到
+`{bp, cf_quality, roe, profit_yoy}` 后，**三种合成方法的净收益全部变差**，
+且子区间从「三段全正」变为「出现负段」：
+
+| 方法 | 2016-2018 | 2019-2022 | 2023-2026 |
+|---|---|---|---|
+| 等权（4 因子） | +5.24% | **−3.63%** | **−9.27%** |
+| IC 加权（4 因子） | +0.13% | +1.75% | **−1.80%** |
+| 最大化IR（4 因子） | **−5.05%** | +4.02% | **−4.56%** |
+| 等权（2 因子） | +3.87% | +4.82% | +1.15% ✅ |
+
+即：roe 与 profit_yoy 自身 IC 为正，但 2019 年后失效，
+在合成时把稳健信号**稀释**了。
+
+→ **强制规则**：每加一个因子，必须重跑三段子区间检验；
+**只有三段净收益全正的因子才允许加入**。「多因子」不等于「因子越多越好」。
+
+---
+
+
+
+---
+
+### P14 绩效声明四要素（2026-10-05 新增，最高优先级）
+
+
+本项目已**连续两次**因口径问题得出方向相反的结论。任何绩效数字必须同时说明：
+
+| 要素 | 本项目踩过的坑 |
+|---|---|
+| ① **年化口径** | `spread × periods[0]` 而 `periods[0]=1` → 被低估 252 倍 |
+| ② **成本假设** | 20bp 往返；换手 34.9% 时年成本达 35% |
+| ③ **基准是什么** | 组合 +11.74% 但基准（沪深300指数）只有 +3.31% → 真实超额 +8.43pp；全市场口径超额 **−0.33pp** |
+| ④ **多空还是多头** | 同一因子多空 −14.32%、多头 +11.74%，方向相反 |
+
+⚠️ **等权 vs 市值加权的陷阱（实测）**：
+- 沪深300 成分股**等权**买入持有年化 +11.78%
+- 沪深300 **指数**（市值加权）+3.31%
+- 差异 **8.12pp**，来自 A 股长期的小盘效应，**与选股能力无关**
+→ 只报组合总收益而不报基准，会把小盘 beta 误当因子 alpha。
+
+⚠️ **多空 vs 多头的陷阱**：
+多空组合需要做空低分组，A股融券成本 8%+ 且券源稀缺，
+所以「多空净收益」在实际中**无法执行**。A 股散户只看多头口径。
+
+
+
+---
+
+### P15 高 IC 等于高换手（本项目最重要的实证，2026-10-05）
+
+
+全市场 23 因子实测，出现大量「IC/ICIR 很强但净收益极差」：
+
+| 因子 | ICIR | 换手 | 年化净 |
+|---|---|---|---|
+| ma_bias_20 | 0.453 | 34.9% | **−63.01%** |
+| rev_20 | 0.423 | 30.7% | −52.80% |
+| illiq_accel | 0.448 | 49.1% | **−152.46%** |
+| idio_vol_20 | **0.639**（全库最高） | 13.3% | −9.21% |
+| bp | 0.330 | 3.9% | **+3.21%** ✅ |
+| low_vol_120 | 0.306 | 3.9% | **+2.32%** ✅ |
+
+**机制**：年成本 = 20bp × 换手 × 分组数。换手 34.9% → 年成本 35%。
+
+→ **强制规则：按 ICIR 排序选因子会选出完全不可用的组合。
+   筛选因子必须同时约束换手（本项目用 < 6%）。**
+
+→ **提升净收益的主要杠杆是【压换手】，不是【加因子】或【加模型】**。
+缓冲区（TopkDropout 思路）实测把换手从 3.78% 压到 0.07%，
+同一套因子净收益从 −3.75% → +5.59%（跨度 9.3pp）。
+
+
+
+---
+
+### P16 pandas 分组与排名方向（本项目最隐蔽的 bug，2026-10-05）
+
+
+```python
+w.groupby(level=0).rank(pct=True)     # ❌ 错
+w.rank(axis=1, pct=True)              # ✅ 对
+```
+宽表是 index=date、columns=asset。按 `level=0`（date）分组后，
+`rank()` 在**组内**排名 = 在整行内排名 → 每行只有一个有效值（全为 1.0）
+→ **所有股票落进同一分组，分组完全失效，但回测不报错、只是结果全错。**
+
+同理 `DataFrame.apply(np.ceil)` 默认按列应用，会整列被同一标量 ceil；
+分位→分组的转换必须显式 `axis=1`。
+
+**自查方法**：随机造一个宽表，检查每行 value_counts 是否各组约等量、
+相邻两日的高分组交集是否远小于组大小。
+
+
+
+---
+
+### P17 回测前必做数据质量审计（2026-10-05 新增，本项目最严重的数据问题）
+
+
+**通达信本机数据存在部分未复权，污染率与影响量级：**
+- 主板异常率 0.291%（主板分红送转更频繁，是双创的 2.3 倍）
+- 等权买入持有 10 年累计：原始 +29.5% → 清洗后 +53.6% → **年化偏差 2.33pp**
+- 典型案例：平安银行 2016-06-16 单日 −17.91%，开盘直接跳空 −17.91%、
+  日内振幅仅 0.8% → 10 送 X 除权，不是真实行情
+
+**→ 强制规则：任何回测前先跑 `research/scripts/audit_data_quality.py`。**
+偏差 > 0.5pp/年 必须先清洗。审计脚本会输出污染规模、逐板块分布、影响量级。
+
+**判别方法**：按板块设涨跌幅限制（main ±10%、gem/star ±20%、bse ±30%），
+超限即为除权或数据错误。
+⚠️ 但**不要误伤次新股**：上市首日无涨跌幅限制，涨 200% 也合法。
+实测 588 只异常股票中仅 28 只（5%）是次新股首日，其余 95% 是真污染。
+
+**其他已确认的数据缺陷**：
+- **行业字段缺失 37.2%**（6,082 只完全无行业）。中性化填 "NA" 等于把
+  37% 的股票当成一个巨大独立行业组 → 行业中性化严重失效。
+  修复：本机 boards 字段含 547 个板块，可直接补全。
+- **财务极端值**：profit_yoy 有 6.91% 越界（最大 15.6亿%），roe 最大 1,418万%。
+  当前靠 MAD±5 缓解，但原始数据质量本身差。
+- **幸存者偏差**：stock_info 含「退/ST」的仅 16 只 → 退市股基本被剔除，
+  收益被系统性高估。本地无法修，需 Tushare `list_status='D'`。
+- **停牌/涨跌停未建模** → 高估策略可执行性。
+
+
+
+---
+
+### P18 pandas 广播陷阱：`bad.loc[empty_index, col] = True`
+
+
+```python
+bad.loc[over.index, c] = True     # ❌ 若 over 为空 Index 且 bad 索引是 RangeIndex
+if len(over):                       # ✅ pandas 会广播到【全部行】→ 整表变 True
+    bad.loc[over, c] = True
+```
+实测后果：异常率被算成 100%（真实值 0.24%）。
+**自查**：任何统计布尔标记的占比时，若结果接近 100% 或 0%，先查这个广播。
+
+---
+
+> 本文件由用户要求建立，是本项目的**强制工作准则**。后续任何 AI 助手接手时必须先读本文件。
+
+---
+---
