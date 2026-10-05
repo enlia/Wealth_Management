@@ -58,7 +58,9 @@ def load_prices(
     ----
     codes : 标的列表，带市场前缀如 'sh600519'。None 表示全部。
     start, end : 'YYYY-MM-DD' 或 'YYYYMMDD'。None 表示不限。
-    field : close / open / high / low / amount / vol
+    field : close / open / high / low / amount / vol / close_adj
+        ⚠️ 收益研究必须用 ``close_adj``（后复权）。``close`` 是未复权价，
+        除权日会出现假跳空（实测年化偏差 −2.365pp），见 AGENTS.md 第二节。
 
     内存提示
     --------
@@ -66,7 +68,7 @@ def load_prices(
     本机 13.9 GB，单次全市场读取可行但会挤占内存；
     若只做横截面研究，建议先用 300~1000 只的池子。
     """
-    allowed = {"close", "open", "high", "low", "amount", "vol"}
+    allowed = {"close", "open", "high", "low", "amount", "vol", "close_adj"}
     if field not in allowed:
         raise ValueError(f"field 必须是 {allowed} 之一，得到 {field!r}")
 

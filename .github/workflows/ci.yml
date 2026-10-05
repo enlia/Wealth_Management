@@ -8,7 +8,7 @@ name: CI
 #   全项目 141 个 ruff 问题中，真正会崩的是 0 个
 #   （F821 未定义名 0 / F811 重复定义 0 / E722 裸except 0）
 # 「全量ruff」是典型的非必要门禁 —— 只会一直红，从不拦真错。
-# 故按ENGINEERING 第五节收敛为 3 项，每项都有事故记录。
+# 故按 ENGINEERING 第五节收敛为 5 项，每项都有事故记录。
 #
 # 依赖数据的检查（audit_data_quality / check_units）**不在 CI 跑** ——
 # data/ 与 runtime/ 都在 .gitignore，CI 上无 market.db、无 Tushare 数据。
@@ -114,7 +114,18 @@ jobs:
           print(f"✓ 全部 {len(files)} 个受检文件均 ≤ {LIMIT} 行")
           PYEOF
 
-      # ── 检查 4：git 提交身份 ──
+      # ── 检查 4：单元测试 ──
+      # 拦下过：tests/ 目录声明在 pyproject 的 testpaths 里但**根本不存在**，
+      #         pytest 从未真正跑过（uv run pytest 报 program not found），
+      #         导致 market_rules 的「理论最大容差」文档数字与代码实测
+      #         相差 0.47~2.3pp，长时间无人发现。
+      # 这项检查同时守住「新增判据逻辑必须有边界测试」。
+      - name: 运行单元测试
+        run: |
+          echo "pytest（market_rules 判据边界，每次改动都要重跑）"
+          uv run pytest tests/ -q
+
+      # ── 检查 5：git 提交身份 ──
       # 拦下过：40 个提交被 WorkBuddy <workbuddy@local> 污染。
       #⚠️ 只查 author，不查 committer：
       #    squash 合并时 GitHub 会把 committer 填成它自己
