@@ -111,8 +111,14 @@ Brock(1992) 发现道指技术规则显著 → Sullivan(1999) 样本外 p=0.15 �
 ## 常用命令
 
 ```bash
-cd C:/Documentation/Wealth_Management/04_工具脚本
-PY="C:/Users/fangshugao/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
+cd 04_工具脚本
+
+# 统一用 uv 管理环境（AGENTS.md 要求，不要用 pip 直装）
+cd ../09_研究项目/factor_lab
+uv run python scripts/run_factor_study.py
+
+# 本项目脚本的 Python 解释器（路径因机器而异，用以下方式自动取）
+PY=$(uv run python -c "import sys; print(sys.executable)")
 
 python tdx.py info                              # 数据概况
 python tdx.py show 603259 --period weekly        # 看周线
