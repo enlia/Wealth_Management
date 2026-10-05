@@ -101,63 +101,76 @@ def ic_by_period(fac_w: pd.DataFrame, prices: pd.DataFrame,
 
 def backtest_with_rebalance(
     w: pd.DataFrame, prices: pd.DataFrame, n_groups: int = 5,
-    rebalance_days: int = 60, buffer_frac: float = 0.10,
+    rebalance_days: int = 60, n_drop: int = 20,
     cost: float = DEFAULT_COST.round_trip,
 ) -> tuple[pd.Series, pd.Series, pd.DataFrame, float]:
-    """按调仓频率 + 缓冲区回测【只持Top 组】。
+    """固定持仓数 + 每次只换最差 n_drop 只（Qlib TopkDropout 思路）。
 
-    ⚠️⚠️ 关键修正（曾导致三种调仓频率结果完全一样）：
-       早期版本把【全部 5 个组的等权平均】当作组合收益，
-       而组合只买 Top 组 → 收益被稀释，且与调仓频率无关。
-       正解：组合收益 = 实际持仓股票的未来收益等权平均，
-             持仓由缓冲区规则决定，随调仓频率变化。
+    ⚠️ 本项目在这个函数上错了两次，都记录在此：
+    第 1 版：用「绝对分位边界」保留持仓 → 调仓越慢换手反而越高（反常）。
+    第 2 版：用「缓冲区扩大的目标持仓数」→ 单次换手高达 90%+，
+           因为持仓集合本身在漂移，且换手口径混用了「单次」与「年化」。
+
+    正确做法（与 Qlib TopkDropoutStrategy 一致）：
+      · 持仓数固定 N = 全池/n_groups
+      · 每次调仓：按因子分数排序，卖掉【已持仓中最差的 n_drop 只】，
+        买入【未持仓中最好的 n_drop 只】
+      · 换手 = n_drop / N（与排名重排幅度无关，只由 n_drop 决定）
+      → 换手完全可控：年换手 = n_drop / N × (252 / rebalance_days)
 
     返回 (日频组合收益, 日频基准收益, 持仓矩阵, 年换手率)
     """
     g = group_rank(w, n_groups)
     dates = prices.index
     fwd = prices.pct_change()
-    bench = fwd.mean(axis=1)                # 基准：全市场等权
+    bench = fwd.mean(axis=1)
 
-    buy_edge = max(1.0, n_groups * (1 - buffer_frac))
-    sell_edge = n_groups * buffer_frac
+    n_hold = max(5, int(round(len(prices.columns) / n_groups)))
+    n_drop = max(1, min(n_drop, n_hold // 2))
+
     held: set = set()
-    prev: set = set()
-    port, hold_mat, turn_list = [], [], []
+    port, hold_mat = [], []
+    per_rebal_turn = []
 
     for i, d in enumerate(dates):
-        if i % rebalance_days == 0 or not held:
+        if i % rebalance_days == 0:
             row = g.loc[d] if d in g.index else None
             valid = row[row > 0] if row is not None and (row > 0).any() else None
             if valid is not None:
-                target = set(valid[valid >= buy_edge].index)
-                if buffer_frac > 0 and held:
-                    keep = held & set(valid[valid > sell_edge].index)
-                    need = max(0, len(prev) - len(keep))
-                    add = [c for c in valid.sort_values(ascending=False).index
-                           if c not in keep][:need]
-                    target = set(keep) | set(add)
-                if prev:
-                    turn_list.append(len(target ^ prev) / max(len(target), 1))
-                held, prev = target, set(target)
-        # 组合收益 = 实际持仓的等权收益
+                score = w.loc[d].reindex(valid.index)
+                order = list(score.sort_values(ascending=False).index)
+                if not held:
+                    held = set(order[:n_hold])
+                else:
+                    # 卖：已持仓里分数最差的 n_drop 只
+                    cur = [(c, score[c]) for c in held if c in score.index]
+                    cur.sort(key=lambda x: x[1])
+                    sell = [c for c, _ in cur[:n_drop]]
+                    # 买：未持仓里分数最好的 n_drop 只
+                    pool = [c for c in order if c not in held][:n_drop]
+                    per_rebal_turn.append(len(set(sell) | set(pool)) / n_hold)
+                    held = (held - set(sell)) | set(pool)
         if held:
             r = fwd.loc[d, list(held)]
             port.append(float(np.nanmean(r.to_numpy(dtype=float))))
         else:
             port.append(np.nan)
-        hold_mat.append({c: 1 for c in held})
+        hold_mat.append(dict.fromkeys(held, 1.0))
 
     pr = pd.Series(port, index=dates, dtype=float)
-    br = bench
-    # 持仓矩阵：直接用 numpy 布尔矩阵，避免 pd.concat(dict) 按key 去重导致行数错位
     hm = pd.DataFrame(0, index=dates, columns=prices.columns, dtype=float)
     if len(hold_mat) == len(dates):
+        col_idx = {c: j for j, c in enumerate(prices.columns)}
         for i, h in enumerate(hold_mat):
             if h:
-                hm.iloc[i, list(prices.columns.get_indexer(list(h.keys())))] = 1.0
-    to = float(np.mean(turn_list)) if turn_list else np.nan
-    return pr, br, hm, to
+                for c in h:
+                    j = col_idx.get(c)
+                    if j is not None:
+                        hm.iat[i, j] = 1.0
+    # 年换手率 = 单次换手 × 年调仓次数
+    per = float(np.mean(per_rebal_turn)) if per_rebal_turn else np.nan
+    annual_turn = per * (TRADING_DAYS / rebalance_days)
+    return pr, bench, hm, annual_turn
 
 
 def main() -> int:
@@ -243,27 +256,24 @@ def main() -> int:
     score = Z[good].mean(axis=1).dropna()
     w = score.unstack()
     results = []
-    for reb in (20, 60, 120):
-        pr, br, hm, to = backtest_with_rebalance(
-            w, prices, cfg.quantiles, reb, 0.10, DEFAULT_COST.round_trip)
-        # 扣成本：换手 × 往返费率 × 分组数（分组数影响每次调仓的成交股数）
-        cost_daily = (DEFAULT_COST.round_trip * to * cfg.quantiles
-                      * TRADING_DAYS) / TRADING_DAYS
-        pr_net = pr - cost_daily
-        cost_ann = DEFAULT_COST.round_trip * to * cfg.quantiles * TRADING_DAYS
-        print(f"\n  ── 每 {reb} 日调仓（换手 {to*100:.2f}%，"
+    for reb, n_drop in ((20, 5), (60, 5), (60, 10), (120, 5), (120, 10)):
+        pr, br, hm, to_annual = backtest_with_rebalance(
+            w, prices, cfg.quantiles, reb, n_drop, DEFAULT_COST.round_trip)
+        # 年成本 = 往返费率 × 年换手 × 分组数（每笔成交涉及买卖双侧）
+        cost_ann = DEFAULT_COST.round_trip * to_annual * cfg.quantiles
+        pr_net = pr - cost_ann / TRADING_DAYS
+        label = f"每{reb}日调仓/每次换{n_drop}只"
+        print(f"\n  ── {label}（年换手 {to_annual*100:.1f}%，"
               f"年成本 {cost_ann*100:.2f}%）")
-        # hit_rate_analysis 需要一个「列名为持有期天数」的 DataFrame
-        # ⚠️ 踩坑：pd.DataFrame(dict_of_2D_frames) 在 pandas 2.3.3 会抛
-        #    "If using all scalar values, you must pass an index"（AGENTS.md 3.6）
         fr = pd.concat({k: prices.pct_change(k) for k in (20, 60, 120)}, axis=1)
         hr = hit_rate_analysis(hm, fr, top_frac=1.0)
         eq2 = equity_metrics(pr_net, br)
         for k in (60, 120):
             eq2.update(period_winrate(pr_net, k))
-        results.append({"调仓": reb, "换手": to, "年成本": cost_ann, **eq2})
+        results.append({"配置": label, "调仓": reb, "n_drop": n_drop,
+                        "年换手": to_annual, "年成本": cost_ann, **eq2})
 
-        print(f"     年化收益(净) {eq2.get('年化收益', np.nan)*100:+.2f}%  "
+        print(f"     年化(净) {eq2.get('年化收益', np.nan)*100:+.2f}%  "
               f"基准 {eq2.get('基准年化', np.nan)*100:+.2f}%  "
               f"超额 {eq2.get('年化超额', np.nan)*100:+.2f}pp")
         print(f"     最大回撤 {eq2.get('最大回撤', np.nan)*100:.2f}%  "
@@ -271,10 +281,10 @@ def main() -> int:
               f"信息比率 {eq2.get('信息比率', np.nan):.2f}")
         if hr is not None and len(hr):
             for _, r in hr.iterrows():
-                print(f"     命中：持有{int(r['持有期_交易日'])}日 "
-                      f"Top组上涨率 {r['Top组上涨率']*100:.1f}% "
-                      f"全市场 {r['全市场上涨率']*100:.1f}% "
-                      f"超额 {r['超额命中率']*100:+.1f}pp")
+                print(f"     命中：持有{int(r['持有期_交易日']):>3}日 "
+                      f"Top组 {r['Top组上涨率']*100:>5.1f}%  "
+                      f"全市场 {r['全市场上涨率']*100:>5.1f}%  "
+                      f"超额 {r['超额命中率']*100:>+5.1f}pp")
         wr = eq2.get("持有60日_胜率")
         if wr:
             print(f"     持有60日胜率 {wr*100:.1f}%  "
