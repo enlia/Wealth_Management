@@ -190,15 +190,15 @@ def main() -> int:
     print(f"审计 {len(codes):,} 只 A 股（{args.start} ~ {args.end}）\n")
 
     prices = load_prices(codes, args.start, args.end, field="close")
-    r = audit_price_data(prices)
+    # audit_price_data 内部直接打印全部结果（verbose=True），
+    # 返回的 dict 仅作调用方备用，此处无需接收。
+    audit_price_data(prices)
 
     print()
     print("=" * 70)
     print("逐板块异常分布")
     print("=" * 70)
     _, bad = clean_returns(prices)
-    boards = pd.Series([board_of(c) for c in prices.columns],
-                       index=prices.columns)
     for b in ["main", "gem", "star", "bse"]:
         cols = [c for c in prices.columns if board_of(c) == b]
         if not cols:
