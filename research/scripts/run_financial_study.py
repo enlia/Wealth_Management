@@ -149,6 +149,11 @@ def build_financial_factors(
     if shares_map is not None:
         sh = shares_map.to_numpy(dtype=float)
         # stack 顺序 = (date 外层, code 内层)，与 daily 索引顺序一致
+        # ⚠️ 此处 mktcap 的单位是【亿元】：close(元/股) × shares(亿股) = 亿元
+        #    与 stock_info.mktcap（【万元】，见 factor_lab.config.MARKET_CAP_UNIT）
+        #    口径不同，不要拿它与 stock_info.mktcap 直接比。
+        #    用于 log 市值中性化时常数倍会被回归截距吸收，故结果一致
+        #    （实测残差差异 6.66e-16）。
         daily["mktcap"] = daily["close"].to_numpy() * np.tile(sh, len(dates))
 
     daily = daily[np.isfinite(daily["close"]) & (daily["close"] > 0)].copy()
@@ -362,7 +367,10 @@ def main() -> int:
     print(f"      面板 {len(panel):,} 行，{panel['sym'].nunique():,} 只")
 
     trading_days = prices.index
-    # 总股本（用于市值中性化）。shares 单位待核，见 build_financial_factors 注释。
+    # 总股本（用于市值中性化）
+    # shares 单位 = 亿股（已核验：mktcap / shares 精确等于股价，见
+    # research/scripts/check_units.py）；市值口径为【亿元】，与
+    # stock_info.mktcap 的【万元】不同口径，仅用于 log 中性化。
     shares = None
     if "shares" in info.columns:
         shares = info.set_index("code")["shares"]

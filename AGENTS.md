@@ -60,7 +60,7 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | 文件                                 | 内容                               | 行数 |
 | ------------------------------------ | ---------------------------------- | ---- |
 | `.github/standards/ENGINEERING.md` | **工程规范全文，最高优先级** | —  |
-| `.github/standards/PITFALLS.md`    | 18 条技术踩坑（含 5 条结论反转）   | 425  |
+| `.github/standards/PITFALLS.md`    | 19 条技术踩坑（含 6 条结论反转）   | 462  |
 
 ---
 
@@ -195,7 +195,7 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 
 ## 三、技术踩坑速查（详见 .github/standards/PITFALLS.md）
 
-18 条技术坑全部为项目实证，**每次 review 必须逐条核对**：
+19 条技术坑全部为项目实证，**每次 review 必须逐条核对**：
 
 | 编号 | 主题 | 一句话结论 |
 |---|---|---|
@@ -217,8 +217,9 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | **P16** | **pandas 分组排名方向** | 🔴 **不报错但结果全错** |
 | **P17** | **回测前必做数据审计** | 🔴 **2.33pp 年化偏差** |
 | **P18** | **pandas 广播陷阱** | 🔴 **空索引广播成 100%** |
+| **P19** | **市值量纲亿元 vs 万元** | 🔴 **差 1 万倍且不报错** |
 
-🔴 **P10 / P15 / P16 / P17 / P18 会导致结论方向性反转**，review 时最高优先级。
+🔴 **P10 / P15 / P16 / P17 / P18 / P19 会导致结论方向性反转**，review 时最高优先级。
 
 ---
 
