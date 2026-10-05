@@ -18,7 +18,7 @@ _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent.parent / "src"))
 sys.path.insert(0, str(_HERE.parent))
 
-from factor_lab.config import DB_PATH  # noqa: E402
+from factor_lab.config import DB_PATH, MARKET_CAP_UNIT, to_wan  # noqa: E402
 from tdx import read_day, all_codes, market_of  # noqa: E402
 
 # ⚠️ 踩坑记录（2026-10-05）：原代码硬编码
@@ -141,11 +141,20 @@ def build():
         u = u.rename(columns=cols)
         keep = [v for v in cols.values() if v in u.columns]
         u2 = u[keep].where(u[keep].notna(), None)
+
+        # ⚠️ 单位统一（2026-10-06）：universe.csv 的市值是【亿元】，
+        #    而 Tushare 的 total_mv / circ_mv 是【万元】。
+        #    本项目统一用【万元】，否则两者混用差 1 万倍，会彻底污染市值因子。
+        #    实测反推：mktcap(亿) / shares(亿股) = 股价 ✓
+        for col in ("mktcap", "float_mktcap"):
+            if col in u2.columns:
+                u2[col] = u2[col].map(to_wan)
+
         con.executemany(
             f"INSERT OR REPLACE INTO stock_info({','.join(keep)}) "
             f"VALUES({','.join('?'*len(keep))})", u2.itertuples(index=False, name=None))
         con.commit()
-        print(f"  股票信息 {len(u2)} 条")
+        print(f"  股票信息 {len(u2)} 条（市值已统一为{MARKET_CAP_UNIT}）")
 
     # 板块
     if os.path.exists("sectors_index.csv"):
