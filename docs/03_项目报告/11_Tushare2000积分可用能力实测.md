@@ -164,7 +164,7 @@ uv run python research/scripts/merge_tushare_into_db.py  # 并入本机库
 uv run python research/scripts/audit_data_quality.py     # 确认年化偏差 < 0.5pp
 ```
 
-**第三步是硬约束**：此前实测未复权污染造成 2.3pp 年化偏差，
+**第三步是硬约束**：此前实测未复权污染造成 2.33pp 年化偏差，
 不确认修正就不���做任何收益结论。
 
 ---
