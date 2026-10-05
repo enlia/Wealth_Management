@@ -1,0 +1,169 @@
+name: CI
+
+# ═══════════════════════════════════════════════════════════════
+# 设计原则（ENGINEERING.md 第五节：禁止非必要门禁）
+#
+# 只设「拦得下真错」的检查，且**每条都要能说出拦过什么**。
+# 已实测：全项目 147 个 ruff 问题中，真正会崩的是 0 个
+#       （F821 未定义名 0、E999 语法错误 0）
+# 所以「全量ruff」是典型的非必要门禁 —— 只会一直红，从不拦真错。
+#
+# 实际拦下过真错的三项：
+#   1. verify_imports.py  → joblib 未声明，重建 venv 后 4 脚本连锁崩溃
+#   2. 行数上限 500        → AGENTS.md 曾在579 行、拆分后 360 行
+#   3. git 身份            → 40 个提交被WorkBuddy 身份污染
+#
+# 依赖数据的检查（audit_data_quality / check_units）**不在 CI 跑** ——
+# data/ 与 runtime/ 都在 .gitignore，CI 上无 market.db、无 Tushare 数据。
+# 硬跑必然失败，那是「设计失效的门禁」，不是有效门禁。
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的新 push 会取消旧 run，避免队列堆积
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: 静态检查与结构校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 版本必须与本地一致：3.12（<3.13 是依赖链硬约束，
+      # peewee 3.17.3 在 3.13 下构建失败，见 pyproject.toml 注释）
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: 缓存 uv 依赖
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-
+
+      - name: 同步依赖
+        run: |
+          uv sync --frozen --no-dev
+          # 补上校验脚本需要的 ruff（dev 依赖里）
+          uv pip install ruff
+
+      # ── 检查 1：会崩的错误（实测当前 0 个，作为回归防线）──
+      # ⚠️ 规则集已用 ruff 0.16 实测校验 —— E999 在新版中已被移除，
+      #    选它会让 ruff 直接报错退出（Codex 首次配置时踩到）。
+      # 每条规则都对应一种「代码跑不起来或逻辑错乱」的真错：
+      #   F821未定义名（NameError）/ F811 重复定义
+      #   E722 裸 except（吞掉所有错误）/ F632 is-literal 恒真判断
+      #   F5xx 形参误用（用在外层变量上）
+      - name: 检查致命错误
+        run: |
+          echo "检查 F821/F811/E722/F632/F5xx —— 任一出现即代码不可运行"
+          uv run ruff check src/ research/ \
+            --select F821,F811,E722,F632,F402,F501,F502,F522,F525,F601 \
+            --output-format=github
+
+      # ── 检查 2：未使用变量（可能是漏赋值）──
+      # 实测拦下过：merge_tushare_into_db.py:83 的 adj_i
+      #           赋值了但从未使用，说明「以为用了其实没���」
+      - name: 检查未使用变量
+        run: |
+          echo "检查 F841 —— 赋值但未使用，常是漏写/漏改的痕迹"
+          uv run ruff check src/ research/ \
+            --select F841 \
+            --output-format=github
+
+      # ── 检查 3：脚本 import 链（拦下过 joblib 真实事故）──
+      - name: 验证所有脚本可导入
+        run: |
+          echo "验证 34 个脚本的 import 链"
+          echo "（曾因 joblib 未声明，重建 venv 后 4 个脚本连锁 ModuleNotFoundError）"
+          uv run python research/scripts/verify_imports.py
+
+      # ── 检查 4：文件行数上限（对应用户明确要求）──
+      # 文档豁免；400~500 为强制拆分区
+      - name: 检查文件行数上限
+        run: |
+          echo "代码文件 ≤ 500 行（文档/生成物豁免）"
+          uv run python - <<'PYEOF'
+          import subprocess
+          from pathlib import Path
+
+          LIMIT = 500
+          FORCED_SPLIT = 400
+          # 豁免：文档、生成物、第三方参考
+          EXEMPT_SUFFIX = {".md", ".lock", ".pdf", ".csv", ".parquet", ".jsonl"}
+          EXEMPT_DIRS = {"reference", "runtime", "data", ".venv", ".workbuddy"}
+
+          files = subprocess.run(
+              ["git", "ls-files", "*.py", "*.sh", "*.toml", "*.sql"],
+              capture_output=True, text=True, check=True).stdout.split()
+
+          over, warn = [], []
+          for f in files:
+              p = Path(f)
+              if p.suffix in EXEMPT_SUFFIX or (EXEMPT_DIRS & set(p.parts)):
+                  continue
+              n = len(p.read_text(encoding="utf-8", errors="replace").splitlines())
+              if n > LIMIT:
+                  over.append((n, f))
+              elif n > FORCED_SPLIT:
+                  warn.append((n, f))
+
+          if warn:
+              print(f"⚠️ 强制拆分区（{FORCED_SPLIT}~{LIMIT} 行），触碰时需同时降下来：")
+              for n, f in sorted(warn, reverse=True):
+                  print(f"   {n:>4}  {f}")
+
+          if over:
+              print(f"\n✗ 超过 {LIMIT} 行上限：")
+              for n, f in sorted(over, reverse=True):
+                  print(f"   {n:>4}  {f}  （超 {n - LIMIT} 行）")
+              raise SystemExit(1)
+
+          print(f"✓ 全部 {len(files)} 个受检文件均 ≤ {LIMIT} 行")
+          PYEOF
+
+      # ── 检查 5：git 身份（拦下过 40 个提交被污染）──
+      - name: 校验提交作者身份
+        run: |
+          echo "所有提交的作者必须是 enlia <2020621056@qq.com>"
+          echo "（曾有 40 个提交被 WorkBuddy <workbuddy@local> 污染）"
+          BAD=$(git log --all --format='%ae' \
+                | grep -v -x '2020621056@qq.com' | sort -u || true)
+          if [ -n "$BAD" ]; then
+            echo "✗ 发现非预期邮箱："
+            echo "$BAD"
+            echo ""
+            echo "修复：uv run python research/scripts/rewrite_authors.py \\"
+            echo "  --old-name <旧名> --old-email <旧邮箱> \\"
+            echo "  --new-name enlia --new-email 2020621056@qq.com"
+            exit 1
+          fi
+          echo "✓ 全部提交作者正确"
+
+      # ── 检查 6：敏感文件不得入库 ──
+      - name: 检查敏感文件未入库
+        run: |
+          echo "确保 .env 与凭证文件未进入版本控制"
+          LEAKED=""
+          for f in .env .env.local token.txt; do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              LEAKED="$LEAKED $f"
+            fi
+          done
+          if [ -n "$LEAKED" ]; then
+            echo "✗ 以下敏感文件被提交：$LEAKED"
+            echo "  从索引移除：git rm --cached <文件>"
+            exit 1
+          fi
+          echo "✓ 无敏感文件入库"

@@ -93,7 +93,6 @@ def buffered_holdings(
     """
     g = group_rank(w, n_groups)
     dates = g.index
-    top_cut = n_groups                       # 最高分位
     buy_cut = int(np.ceil(n_groups * (1 - buffer_frac)))   # 放宽后的买入边界
     sell_cut = int(np.floor(n_groups * buffer_frac)) + 1     # 放宽后的卖出边界
 
