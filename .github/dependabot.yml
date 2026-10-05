@@ -1,0 +1,33 @@
+# Dependabot：自动跟进 action 与依赖版本
+#
+# 动机：2026-10-06 CI 首次运行时 GitHub 提示
+#   "Node.js 20 is deprecated. The following actions target Node.js 20
+#    but are being forced to run on Node.js 24:
+#    actions/cache@v4, actions/checkout@v4, astral-sh/setup-uv@v5"
+#
+# 说明：这三条是**警告**不是失败，CI 仍通过。
+# 但留着会越来越吵，且未来可能变成错误。
+# Dependabot 会自动开 PR 升级，不需要人工记着。
+version: 2
+
+updates:
+  # GitHub Actions 版本
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+
+  # Python 依赖（uv.lock 会随 PR 更新）
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
