@@ -239,6 +239,40 @@ fina_mainbz / forecast）**全部只支持 `ts_code` 逐只拉**，用 `period` 
 探测脚本：`research/scripts/probe_all_interfaces.py`
 补全脚本：`research/scripts/fetch_all_tushare.py`
 
+### 3.19 Git 提交身份（强制，勿改回）
+本项目所有提交必须是：
+```
+user.name  = enlia
+user.email = enlia@example.invalid
+```
+
+**为什么强制**：本项目 40 个提交曾全部被标记为 `WorkBuddy <workbuddy@local>`
+——那是工具默认身份，不是项目所有者。GitHub 会据此统计贡献归属，
+错误身份会让私有仓库的贡献图归到不存在的账号上。
+
+**双重保障**：
+1. `.git/config` 用 `--local` 作用域锁定（不会被全局配置或其他工具覆盖）
+2. `.git/hooks/pre-commit` 每次提交前校验，身份不对直接拒绝提交
+
+⚠️ **Windows PowerShell 下的坑**：`git filter-branch` 无法工作——
+它依赖的 `git-sh-setup`、`cat` 等 shell 命令在该环境下报
+"command not found"。已改用 `research/scripts/rewrite_authors.py`
+（纯 Python 操作 fast-export/fast-import 流，跨平台可靠）。
+
+⚠️ **重写历史时的致命细节**：`git fast-export` **绝不能加 `--no-data`**——
+那会丢弃文件内容，fast-import 重建出的提交树会变空，等于删掉整个仓库。
+必须完整导出（含文件内容）。本项目 3.4M 仓库完整导出无压力。
+
+**若需重写作者**：
+```bash
+git branch backup-before-author-fix    # 先备份
+git tag    backup-before-author-fix
+uv run python research/scripts/rewrite_authors.py \
+  --old-name WorkBuddy --old-email workbuddy@local \
+  --new-name enlia --new-email enlia@example.invalid --dry-run
+# 确认后去掉 --dry-run，再 git push --force-with-lease
+```
+
 ---
 
 ## 四、目录职责
