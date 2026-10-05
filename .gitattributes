@@ -1,0 +1,39 @@
+# ═══════════════════════════════════════════════════════════════
+# 换行符策略
+#
+# 为什么需要（实测踩坑）
+# --------------------
+# Windows 上git 的 core.autocrlf 默认 true，会把 LF 存成 CRLF。
+# 后果：.sh 脚本在 Ubuntu 上直接报
+#     bad interpreter: /bin/sh^M
+#     或 CRLF 与某些工具不兼容。
+# 本项目的 CI 跑在 ubuntu-latest，fetch_quotes.sh 是入库的 .sh 文件，
+# 不处理就会在 CI 崩。
+#
+# 策略：仓库内统一存 LF，检出时按平台转换
+# ─────────────────────────────────────────────────────────────
+
+# 默认：入库统一 LF，检出时 Windows 转 CRLF、其他平台保持 LF
+* text=auto eol=lf
+
+# 明确必须 LF 的（即便在 Windows 也不转换）
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# 明确禁止换行转换（二进制）
+*.png binary
+*.jpg binary
+*.pdf binary
+*.parquet binary
+*.db binary
+*.xlsx binary
+
+# Windows 专用脚本可保留 CRLF（用powershell 执行的 .ps1）
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
