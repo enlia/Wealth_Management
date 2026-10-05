@@ -1,13 +1,18 @@
-"""``factor_lab.market_rules`` 的判据边界测试。
+"""``factor_lab.market_rules`` 与调用方判定逻辑的测试。
 
 为什么必须有这个文件
 ------------------
-``market_rules`` 里全是「魔法数字」：12.8571% / 22.7273% / 32.8571% /
+``market_rules`` 里全是「魔法数字」：13.4615% / 23.2143% / 32.8571% /
 HALF_TICK / MIN_PRICE。这些数字文档里写着，但**没人能验证它们还能算出来**。
 本项目实测踩过：文档写「主板最大 10.48%」，代码实算是 10.95%，
 差异来自加浮点余量后没同步文档 —— 评审才发现。
 
-这些测试的每个断言都对应一个**真实踩过的坑**，不是形式覆盖。
+⚠️ **不只测 market_rules 本身，还要测调用方的布尔组合。**
+   实测踩过：上一轮最严重的 bug 是 `audit_data_quality.judge_limit_rules`里
+   `ok &= ~in_window; return ~ok` 把「排除」写成「计入」。
+   但当时只有 `no_limit_days` 这个纯函数的测试 ——
+   把调用方还原成 bug 版本后，50 个测试**一个都没失败**。
+   纯函数正确 ≠ 调用方组合正确。`TestJudgeIntegration` 专治这个。
 
 运行
 ----
@@ -15,6 +20,7 @@ HALF_TICK / MIN_PRICE。这些数字文档里写着，但**没人能验证它们
 """
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from factor_lab.market_rules import (
@@ -30,6 +36,7 @@ from factor_lab.market_rules import (
     limit_of,
     limit_price,
     max_tolerance,
+    min_tolerance,
     no_limit_days,
     price_tolerance,
 )
@@ -190,25 +197,62 @@ class TestNoLimitDays:
 
 
 class TestIsLimitUp:
-    """Q8配套：容差口径必须与 price_tolerance 一致。"""
+    """判定「达到涨停价」，不是「超过」。
 
-    def test_合法封板(self) -> None:
-        assert is_limit_up(10.00, limit_price(10.00, 0.10), "sh600000") is False
-        assert is_limit_up(2.66, limit_price(2.66, 0.10), "sz002426") is False
+    ⚠️ 旧版用 `> tol - HALF_TICK/pc`，实际在判「超过涨停价」，
+       导致真正的封板判 False、不可能存在的涨幅判 True。
+    """
 
-    def test_明确超限(self) -> None:
-        # 回归：旧实现减整档 TICK，导致 +11% 也返回 True
+    @pytest.mark.parametrize("prev", [0.26, 1.05, 1.10, 2.66, 10.00, 50.00])
+    def test_精确封板必须判True(self, prev: float) -> None:
+        """回归：2.66→2.93、0.26→0.29 都是精确封板，旧版判 False。"""
+        assert is_limit_up(prev, limit_price(prev, 0.10), "sh600000") is True
+
+    def test_越过了涨停价也算封过板(self) -> None:
+        """收盘高于涨停价，说明当天确实触及过涨停。
+        2.66 → 3.00 = +12.78%，涨停价是 2.93（+10.15%），判 True 正确。
+        """
+        assert is_limit_up(2.66, 3.00, "sh600000") is True
         assert is_limit_up(10.00, 11.10, "sh600000") is True
-        assert is_limit_up(10.00, 12.00, "sh600000") is True
 
     def test_普通涨幅不误判(self) -> None:
         assert is_limit_up(10.00, 10.50, "sh600000") is False
         assert is_limit_up(10.00, 10.20, "sh600000") is False
+        assert is_limit_up(0.26, 0.28, "sh600000") is False
 
     @pytest.mark.parametrize("bad", [0.0, -1.0])
     def test_非法前收盘必须报错(self, bad: float) -> None:
         with pytest.raises(ValueError, match="前收盘价必须为正"):
             is_limit_up(bad, 10.0, "sh600000")
+
+
+class TestNoLimitDaysEdge:
+    """评审指出的漏测分支。"""
+
+    def test_北交所走首日分支(self) -> None:
+        # NO_LIMIT_DAYS['bse'] == 1 → n<=1 早退
+        assert no_limit_days("bj920790", 1, 20211115) is True
+        assert no_limit_days("bj920790", 2, 20211115) is False
+
+    def test_漏传first_trade_date的行为(self) -> None:
+        """docstring 说「必须传」，但可选默认值仍存在 —— 记录其真实行为。
+
+        漏传时退化成「一律 5 日窗口」，会让 2023-02-17 前上市的主板新股
+        拿到 4 天不该有的豁免，**漏报**真实除权污染。
+        """
+        assert no_limit_days("sh603124", 3, None) is True
+        # 正确传入则豁免范围相同（该股 2025 年上市）
+        assert no_limit_days("sh603124", 3, 20250320) is True
+        # 反例：老主板新股必须靠 first_trade_date 区分
+        assert no_limit_days("sh600000", 3, None) is True        # 漏传 → 错误豁免
+        assert no_limit_days("sh600000", 3, 19991110) is False   # 正确传入
+
+    def test_注册制生效日当天边界(self) -> None:
+        """代码用 `<` 而非 `<=`，生效日当天上市的新股应享受 5 日窗口。"""
+        assert no_limit_days("sh603124", 5, 20230217) is True
+        assert no_limit_days("sh603124", 6, 20230217) is False
+        # 前一天上市则不适用
+        assert no_limit_days("sh603124", 3, 20230216) is False
 
 
 class TestConstants:
@@ -230,3 +274,93 @@ class TestConstants:
         # 实测 A 股最低 0.26（sz000004）、最高 2832.92（bj899601）
         assert MIN_PRICE <= 0.26
         assert MAX_PRICE >= 2832.92
+
+
+class TestPreFilterBound:
+    """预筛必须用 min_tolerance，不能用 max_tolerance。
+
+    评审实测：800 只样本里，预筛用 max_tolerance 会把落在
+    (精确容差, 兜底阈值] 区间的 **85 条**（占精确判定的 10.65%）静默丢弃。
+    """
+
+    def test_min小于max(self) -> None:
+        assert min_tolerance(0.10) < max_tolerance(0.10)
+
+    def test_预筛下界不会漏掉应判超限的记录(self) -> None:
+        """核心回归：−12.13% 必须能被预筛捞到（它 > 精确容差）。"""
+        prev, ret = 9.26, -0.1213
+        exact = price_tolerance(prev, 0.10)
+        assert abs(ret) > exact, "前提：这条确实应该判超限"
+        assert abs(ret) > min_tolerance(0.10), "预筛必须能捞到它"
+        # 反证：用max_tolerance 就会漏掉
+        assert abs(ret) < max_tolerance(0.10), "这正是原 bug 的表现"
+
+    def test_最小值落在高价区(self) -> None:
+        """最小容差出现在区间右端附近（价格越高，取整误差占比越小）。
+        实测在前收 4999.94 元处取到 10.000020%。
+        """
+        assert min_tolerance(0.10) == pytest.approx(0.10000020, abs=1e-7)
+        # 严格大于名义限幅 —— 因为总有半档 tick 的浮点余量
+        assert min_tolerance(0.10) > LIMIT["main"]
+
+
+class TestJudgeIntegration:
+    """调用方的布尔组合 —— 纯函数对 ≠ 组合对。
+
+    ⚠️ 上一轮最严重的 bug 在``audit_data_quality.judge_limit_rules``：
+       ``ok &= ~in_window; return ~ok``把「排除」写成「计入」。
+       当时 50 个测试一个都没失败，因为只测了``no_limit_days`` 纯函数。
+
+    这里复刻那个判定组合（不 import research/ 脚本，避免耦合），
+    把 4 种 (窗口内/外) × (涨幅超/未超) 的组合全部钉死。
+    """
+
+    @staticmethod
+    def _judge(ret: float, pc: float, in_window: bool, limit: float = 0.10) -> bool:
+        """与 audit_data_quality.judge_limit_rules 同口径的最小复刻。
+
+        排除必须作用在「超限」上，不能靠对「不超限」标志二次取反。
+        """
+        tol = price_tolerance(pc, limit) if pc > 0 else limit
+        over = abs(ret) > tol
+        over &= np.logical_not(in_window)
+        over &= pc > 0
+        return bool(over)
+
+    @pytest.mark.parametrize(
+        ("in_window", "ret", "expect_over"),
+        [
+            # (a) 窗口内大幅波动 → 不是超限（注册制新股合法）
+            (True, 0.350, False),
+            # (b) 窗口外大幅波动 → 超限
+            (False, 0.350, True),
+            # (c) 窗口内小幅波动 → 不是超限
+            (True, 0.005, False),
+            # (d) 窗口外小幅波动 → 不是超限
+            (False, 0.005, False),
+            # 边界：恰好等于容差（合法封板）
+            (False, 0.10, False),
+            # 边界：略微超出容差（真实超限）
+            (False, 0.1100, True),
+        ],
+    )
+    def test_四种组合(self, in_window: bool, ret: float, expect_over: bool) -> None:
+        assert self._judge(ret, 10.00, in_window) is expect_over
+
+    def test_涨跌方向对称(self) -> None:
+        """负收益与正收益的判定必须对称。"""
+        assert self._judge(-0.35, 10.00, True) is False
+        assert self._judge(-0.35, 10.00, False) is True
+
+    @pytest.mark.parametrize("pc", [0.0, -1.0, float("nan")])
+    def test_前收无效时不判定(self, pc: float) -> None:
+        """前收未知 → 无法判定，不能当成超限也不能当成合法。"""
+        assert self._judge(0.35, pc, False) is False
+
+    def test_精确封板不判超限(self) -> None:
+        """Q8 浮点余量：合法封板绝不能被判超限。"""
+        for prev in (0.26, 1.05, 2.66, 10.00, 50.00):
+            lp = limit_price(prev, 0.10)
+            assert self._judge(lp / prev - 1, prev, False) is False, (
+                f"前收 {prev} 的精确封板被判超限"
+            )

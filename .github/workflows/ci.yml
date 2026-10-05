@@ -114,7 +114,7 @@ jobs:
           print(f"✓ 全部 {len(files)} 个受检文件均 ≤ {LIMIT} 行")
           PYEOF
 
-      # ── 检查 5：单元测试 ──
+      # ── 检查 4：单元测试 ──
       # 拦下过：tests/ 目录声明在 pyproject 的 testpaths 里但**根本不存在**，
       #         pytest 从未真正跑过（uv run pytest 报 program not found），
       #         导致 market_rules 的「理论最大容差」文档数字与代码实测
@@ -125,7 +125,7 @@ jobs:
           echo "pytest（market_rules 判据边界，每次改动都要重跑）"
           uv run pytest tests/ -q
 
-      # ── 检查 4：git 提交身份 ──
+      # ── 检查 5：git 提交身份 ──
       # 拦下过：40 个提交被 WorkBuddy <workbuddy@local> 污染。
       #⚠️ 只查 author，不查 committer：
       #    squash 合并时 GitHub 会把 committer 填成它自己

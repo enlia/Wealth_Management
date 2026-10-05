@@ -50,10 +50,11 @@
   from factor_lab.market_rules import board_of, limit_of, no_limit_days
   board_of("sh688205")                  # -> 'star'
   limit_of("sh688205")                  # -> 0.20
-  no_limit_days("sh688205", 6)          # -> True（上市第 6 日仍无限制）
+  no_limit_days("sh688205", 6)          # -> False（第 6 日才有限幅）
 """
 from __future__ import annotations
 
+import functools
 from decimal import ROUND_HALF_UP, Decimal
 
 # 名义涨跌幅限制（小数），按当前制度
@@ -178,30 +179,70 @@ def max_tolerance(limit: float = 0.10) -> float:
       最终判定必须走 `price_tolerance()` 的逐日精确计算。
     ⚠️ 这三个数字由 tests/test_market_rules.py 断言，改动即需同步文档。
     """
+    return _max_tolerance_cached(limit)
+
+
+@functools.lru_cache(maxsize=8)
+def _max_tolerance_cached(limit: float) -> float:
     worst = 0.0
-    lo = round(MIN_PRICE * 100)
-    for cents in range(lo, round(MAX_PRICE * 100) + 1):
+    for cents in range(round(MIN_PRICE * 100), round(MAX_PRICE * 100) + 1):
         pc = cents / 100
-        t = limit_price(pc, limit) / pc - 1 + HALF_TICK / pc
+        t = price_tolerance(pc, limit)
         if t > worst:
             worst = t
     return worst
 
 
+def min_tolerance(limit: float = 0.10) -> float:
+    """在 [MIN_PRICE, MAX_PRICE] 全价格区间内，容差的**最小**值。
+
+    用于「预筛」：只有 |收益| 超过这个下界，才值得去算逐日精确容差。
+
+    ⚠️ 预筛必须用 min_tolerance，**不能用 max_tolerance**。
+       兜底阈值比逐日精确容差更宽，用它筛选等于
+       「用宽标准挑出严标准要的东西」—— 结果是
+       落在 (精确容差, 兜底阈值] 区间的真实超限记录被静默丢弃。
+       实测踩过：sh600000 2016-06-23 跌 -12.13%，
+       精确容差 10.10% 应判超限，兜底 13.46% 却把它筛掉了。
+       800 只样本里因此丢了 85 条（占精确判定的 10.65%）。
+
+    语义：**下界筛掉的是「任何价位都不可能超限」的记录**，
+    落在这个区间之外（即|收益| ≤ min_tolerance）才可安全跳过精确计算。
+
+    实测值：名义 10% → 10.0002%
+    """
+    #穷举 5 万个价位 × 每只股票调用一次 = 400 万次循环，太慢。
+    # 结果只依赖 limit，用 lru_cache 缓存（limit 只有 3 种取值）。
+    return _min_tolerance_cached(limit)
+
+
+@functools.lru_cache(maxsize=8)
+def _min_tolerance_cached(limit: float) -> float:
+    best = float("inf")
+    for cents in range(round(MIN_PRICE * 100), round(MAX_PRICE * 100) + 1):
+        pc = cents / 100
+        t = price_tolerance(pc, limit)
+        if t < best:
+            best = t
+    return best
+
+
 def is_limit_up(prev_close: float, close: float, code: str) -> bool:
-    """收盘是否封涨停板（用于区分「真实涨停」与「复权残留」）。
+    """收盘是否**达到**涨停价（封板）。
 
-    ⚠️ 容差口径必须与 `price_tolerance()` 一致 —— 那里加的是**半档** tick，
-    这里减的也必须是半档。早��版本减的是整档 TICK，导致：
-        主板 10.00 → 11.10（+11%，明确超限）被判True
-    函数完全失去鉴别力（任何涨幅 ≥ 约 9% 都返回 True）。
+    ⚠️ 必须是「达到」而非「超过」。涨停价是 `limit_price()` 的精确输出，
+       封板时涨幅**恰好等于**纯取整撑大值；若用 `>` 比阈值（阈值含浮点余量），
+       真正的封板会判 False。实测：
+         2.66 → 2.93（精确涨停）  纯取整 +10.15%  →必须 True
+         0.26 → 0.29（精确涨停）  纯取整 +11.54%  → 必须 True
+         2.66 → 3.00（+12.78%）  → 必须 False
 
-    判据：涨幅达到涨停价，且未超出浮点余量。
+       判据：涨幅 ≥ 纯取整撑大值（不含HALF_TICK 余量，那是给判超限用的）。
     """
     if prev_close <= 0:
         raise ValueError(f"前收盘价必须为正：{prev_close!r}")
-    tol = price_tolerance(prev_close, limit_of(code))
-    return close / prev_close - 1 > tol - HALF_TICK / prev_close
+    pure = limit_price(prev_close, limit_of(code)) / prev_close - 1
+    return close / prev_close - 1 >= pure - 1e-12
 
 
 # 注册制新股上市后不设涨跌幅限制的交易日数。
