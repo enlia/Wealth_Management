@@ -3,7 +3,7 @@
 背景（2026-10-05 审计）
 ----------------------
 本机通达信数据存在三处可量化缺陷：
-  1. 未复权除权污染：主板 0.291%，年化偏差 2.3pp
+  1. 未复权除权污染：主板 0.291%，年化偏差 2.33pp
   2. 行业字段缺 37.2%（6,082 只无行业）
   3. 幸存者偏差：退市股基本被剔除
 
@@ -163,7 +163,7 @@ def main() -> int:
     f = Fetcher(token, args.start, args.end)
 
     # ① 复权因子（最关键）
-    print("\n[1/3] 复权因子 adj_factor（修正 2.3pp 年化偏差）…")
+    print("\n[1/3] 复权因子 adj_factor（修正 2.33pp 年化偏差）…")
     adj = f.fetch_by_stock("adj_factor", codes)
     if len(adj):
         adj.to_parquet(OUT_DIR / "adj_factor.parquet", index=False)

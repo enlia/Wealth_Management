@@ -17,16 +17,36 @@ from pathlib import Path
 #   正确做法：从本文件位置逐级上溯，找含 .git 的目录作为项目根。
 #   这样无论项目放在C:\ 还是 D:\ 或用户目录，都无需改代码。
 def _find_workspace() -> Path:
-    """向上查找项目根：优先环境变量 WM_ROOT，否则找 .git 标记。"""
+    """向上查找项目根：环境变量 WM_ROOT → 含 .git 的祖先目录。
+
+    ⚠️ 禁止静默 fallback（见 ENGINEERING.md 第四节）。
+       找不到项目根时必须报错，不能悄悄返回某个猜测路径 ——
+       否则 WORKSPACE 会指向错误目录，DB_PATH 报「文件不存在」，
+       错误信息指向的是症状（数据库）而非根因（项目根没找到）。
+    """
     env = os.environ.get("WM_ROOT")
     if env:
-        return Path(env).expanduser().resolve()
+        p = Path(env).expanduser().resolve()
+        if not (p / "data").is_dir() and not (p / ".git").exists():
+            raise ValueError(
+                f"WM_ROOT 指向的目录不像项目根：{p}\n"
+                f"应包含 data/ 或 .git/。请检查 WM_ROOT 设置。"
+            )
+        return p
 
     for parent in Path(__file__).resolve().parents:
         if (parent / ".git").exists():
             return parent
-    # 兜底：src/factor_lab/config.py → 上一级是 src → 再上级是根
-    return Path(__file__).resolve().parents[2]
+
+    # 三级都找不到：明确报错，不静默猜测
+    here = Path(__file__).resolve()
+    raise RuntimeError(
+        f"找不到项目根（向上搜索未发现 .git 目录）。\n"
+        f"  起点：{here}\n"
+        f"  原因：项目被移动到非 git 管理的目录，或 .git 被删除。\n"
+        f"  解决：设置环境变量 WM_ROOT 指向项目根目录，例：\n"
+        f"       set WM_ROOT=C:/path/to/Wealth_Management"
+    )
 
 
 WORKSPACE = _find_workspace()
