@@ -12,8 +12,8 @@
 **别人已经做好的东西，直接拿来用。** 不要花时间把成熟方案重新实现一遍。
 
 执行顺序：
-1. **先看本项目 `06_开源项目/` 下已克隆的 15 个项目** —— 已有回测框架（vectorbt、rqalpha、qlib、bt）、因子库（OpenAlpha、alphalens-reloaded、mlfinlab、machine-learning-for-trading）、数据源（adata、efinance、mootdx、eltdx、easyquotation）
-2. **再看 `04_工具脚本/` 下的自研脚本** —— 已有通达信二进制解析、SQLite 库构建、财务表解析、因子基准测试
+1. **先看本项目 `reference/` 下已克隆的 15 个项目** —— 已有回测框架（vectorbt、rqalpha、qlib、bt）、因子库（OpenAlpha、alphalens-reloaded、mlfinlab、machine-learning-for-trading）、数据源（adata、efinance、mootdx、eltdx、easyquotation）
+2. **再看 `src/tools/` 下的自研脚本** —— 已有通达信二进制解析、SQLite 库构建、财务表解析、因子基准测试
 3. **还不满足就上网找**（GitHub / 官方文档 / 论文附带实现），或派子 agent 去挖
 4. 装上就用，不要因为"想自己控制"而重写
 
@@ -21,7 +21,7 @@
 
 **只有当现成方案确实不满足需求时**才自己写，且必须：
 - 先说明现成方案为什么不行（具体到接口/性能/数据口径）
-- 记录在 `03_研究方法/` 说明取舍理由
+- 记录在 `research/methods/` 说明取舍理由
 - 写完后回头看看能否用现成方案替代
 
 **已直接复用的记录**（后续助手请延续，不要重复劳动）：
@@ -142,7 +142,7 @@
 **Python 联网在 Bash 沙箱内会被杀，需 `dangerouslyDisableSandbox`。**
 
 ### 3.1 Python 环境管理（强制用 uv，不要用 venv+pip）
-本项目用 **uv** 管理环境（`09_研究项目/factor_lab/`），**已踩过的坑**：
+本项目用 **uv** 管理环境（**项目根**），**已踩过的坑**：
 
 | 坑 | 现象 | 结论 |
 |---|---|---|
@@ -170,41 +170,66 @@
 ### 3.3 pandas 2.x 的 stack 层级顺序会变
 `DataFrame.stack()` 在 pandas 2.x 得到 `(index, column)` 顺序，与旧版相反。构造 MultiIndex **一律用 `pd.MultiIndex.from_arrays`**，不要用 stack 后改 names。
 
-常用命令：
+常用命令（**项目根执行**，uv 项目根已提升到仓库根）：
 ```bash
-cd C:/Documentation/Wealth_Management/09_研究项目/factor_lab
+cd Wealth_Management        # 任何子目录都行，不必再往下钻
 uv sync                      # 同步依赖（走镜像，~13s）
 uv run python -c "..."       # 用项目环境执行
-uv add <包>                  # 加依赖
+uv add <包># 加依赖
 ```
+
+### 3.14 目录重组后的路径规则（2026-10-05，勿改回）
+旧结构 `09_研究项目/factor_lab/scripts/` 下的脚本用
+`Path(__file__).parent.parent` 上溯两级取 `src/` 与 `out/`。
+搬到`research/scripts/` 后上溯两级只能到仓库根的中层，**30+ 处全部失效**。
+
+现在统一为：
+```python
+# 脚本在 research/scripts/xxx.py，parents[2] 才是仓库根
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+OUT = Path(__file__).resolve().parents[2] / "runtime"
+```
+
+**更优先的做法**：直接 `from factor_lab.config import DB_PATH, OUTPUT_DIR`，
+不要自己拼路径。`config.py` 已实现三级发现（`WM_ROOT` 环境变量 →
+含 `.git` 的祖先目录 → `parents[2]` 兜底），任何位置都能正确解析。
+
+⚠️ **禁止在代码里硬编码绝对路径**。曾因
+`WORKSPACE = Path(r"C:\Documentation\Wealth_Management")` 导致项目无法
+搬到第二台电脑——而同步到另一台机器是明确的项目需求。
 
 ---
 
 ## 四、目录职责
 
+七层结构，每层职责单一。**找东西先判断它属于哪一类**：
+
 ```
 Wealth_Management/
 ├── AGENTS.md              ← 本文件，工作准则
-├── README.md              ← 总索引
-├── 01_数据源/             数据获取指南（不含数据本身）
-├── 02_数据库/             market.db + free_data/（不进 git）
-├── 03_研究方法/           方法论文档
-├── 04_工具脚本/           通用工具脚本
-├── 05_实证研究/           已完成的实证报告
-├── 06_开源项目/           第三方项目（不进 git，只读参考）
-├── 07_知识与文献/         学术与书籍
-├── 08_术语与概念/         术语词典
-└── 09_研究项目/           ← 算法研究代码（本次新建）
-    └── factor_lab/
-        ├── config/       配置文件
-        ├── data/         数据访问层（只读，不含计算）
-        ├── factors/      因子计算（纯函数）
-        ├── analysis/     检验统计（复用 alphalens / mlfinlab）
-        ├── scripts/      可执行入口
-        └── tests/        单元测试与小样本冒烟
+├── README.md              ← 总索引与快速上手
+├── pyproject.toml         ← uv 项目根（已从 factor_lab/ 提升到这里）
+│
+├── data/       ① 数据层    market.db(1.9G) + free_data/    【不进 git】
+├── src/        ② 代码层    factor_lab/（可安装包）+ tools/  【进 git】
+│   ├── factor_lab/config.py    路径自动发现、成本模型、股票池
+│   ├── factor_lab/data/        数据接入（只读）
+│   ├── factor_lab/factors/     因子计算（纯函数）
+│   └── factor_lab/analysis/    检验统计（alphalens 适配 / 打分卡）
+├── research/  ③ 研究层    scripts/（17 个研究脚本）+ methods/  【进 git】
+├── results/   ④ 产出层    研究结论：HTML 报告 / CSV / PDF    【进 git】
+├── docs/      ⑤ 文档层    01_参考资料 / 02_方法与结论 /
+│                          03_项目报告 / data / 术语词典      【进 git】
+├── reference/ ⑥ 参考层第三方开源项目 935M          【不进 git】
+└── runtime/   ⑦ 运行时    可重建产出 68M                【不进 git】
 ```
 
-**不进 git**：`.db` / `.csv` 数据文件、`06_开源项目/`（第三方代码）、`raw/`、`.parquet`
+**层级判据**：
+- 数据→ `data/`，代码 → `src/`，研究脚本 → `research/scripts/`
+- **结论与报告 → `results/`（进 git）**，中间产出 → `runtime/`（不进 git）
+- 外部知识 → `docs/01_参考资料/`；本项目方法 → `research/methods/`
+
+**不进 git**：`data/`、`reference/`、`runtime/`、`.db`、`.parquet`、`*.log`、`.env`
 
 ---
 
@@ -231,7 +256,7 @@ Wealth_Management/
 
 ### 已完成研究
 - 黄金分割实证（1,273 样本）：**0.618 已被严格检验为无独立预测力**
-- 文献证据整理（40+ 篇，07_知识与文献）
+- 文献证据整理（40+ 篇，docs/01_参考资料/）
 
 ### 已完成的因子检验（2026-10-03，全市场 5,593 只 A 股 / 2,611 日 / 2016-2026）
 
@@ -446,7 +471,7 @@ w.rank(axis=1, pct=True)              # ✅ 对
 - 典型案例：平安银行 2016-06-16 单日 −17.91%，开盘直接跳空 −17.91%、
   日内振幅仅 0.8% → 10 送 X 除权，不是真实行情
 
-**→ 强制规则：任何回测前先跑 `scripts/audit_data_quality.py`。**
+**→ 强制规则：任何回测前先跑 `research/scripts/audit_data_quality.py`。**
 偏差 > 0.5pp/年 必须先清洗。审计脚本会输出污染规模、逐板块分布、影响量级。
 
 **判别方法**：按板块设涨跌幅限制（main ±10%、gem/star ±20%、bse ±30%），
