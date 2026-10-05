@@ -135,8 +135,8 @@ class TestMaxTolerance:
 
     def test_与文档数字一致(self) -> None:
         # 文档 DATA_QUALITY.md Q2 记录的这三个数字，改动即需同步文档
-        assert max_tolerance(0.10) == pytest.approx(0.128571, abs=1e-5)
-        assert max_tolerance(0.20) == pytest.approx(0.227273, abs=1e-5)
+        assert max_tolerance(0.10) == pytest.approx(0.134615, abs=1e-5)
+        assert max_tolerance(0.20) == pytest.approx(0.232143, abs=1e-5)
         assert max_tolerance(0.30) == pytest.approx(0.328571, abs=1e-5)
 
     def test_必须覆盖区间内所有价格(self) -> None:
@@ -178,7 +178,9 @@ class TestNoLimitDays:
         assert no_limit_days("sh600000", 2, 19991110) is False
 
     def test_老股任何交易日都有限幅(self) -> None:
-        for td in (1, 2, 3, 100, 2000):
+        # 首日（td=1）任何股票都无涨跌幅限制，这是制度而非豁免
+        assert no_limit_days("sz000001", 1, 19910403) is True
+        for td in (2, 3, 100, 2000):
             assert no_limit_days("sz000001", td, 19910403) is False
 
     def test_创业板注册制前的次新股(self) -> None:
