@@ -13,10 +13,16 @@
   固定 10.5% 容差把 sz002426 的 31 条真实封板涨停误判成 27 条污染。
 
 **v3（当前）用价格相关的动态容差** `market_rules.price_tolerance()`，
-  逐日按该股前收盘价算出的真实涨停阈值判定。实测主板最大需容忍 10.48%。
+  逐日按该股前收盘价算出的真实涨停阈值判定。
+  预筛必须用 `min_tolerance()`（容差下界）——
+  用 `max_tolerance()` 会把落在 (精确容差, 兜底阈值] 区间的真实超限丢弃。
 
-同时用 `close == high` 做交叉验证：真实封板涨停的收盘必然等于最高价，
-而复权失败造成的跳空不会。两者独立，能互为证据。
+同时用 `close == high`（涨停）/ `close == low`（跌停）做交叉验证：
+真实封板时收盘必然等于最高/最低价，而复权失败造成的跳空不会。两者独立，能互为证据。
+
+⚠️ 预筛必须用 `min_tolerance()`（容差下界），不能用 `max_tolerance()`。
+   用兜底阈值筛「严标准要的东西」会把真实超限静默丢弃 ——
+   实测 800 只样本丢 85 条（占精确判定的 10.65%）。
 
 为什么必须实测而非推断
 ----------------------
@@ -56,7 +62,7 @@ from factor_lab.market_rules import (  # noqa: E402
     board_cn,
     board_of,
     limit_of,
-    max_tolerance,
+    min_tolerance,
     no_limit_days,
     price_tolerance,
 )
@@ -64,7 +70,7 @@ from factor_lab.market_rules import (  # noqa: E402
 TICK = 0.01
 
 
-def pick_codes(con: sqlite3.Connection, n_total: int, seed: int) -> list[str]:
+def pick_codes(n_total: int, seed: int) -> list[str]:
     """分层抽样：按板块比例抽，避免 bj 排最前时全抽北交所（见 PITFALLS）。
 
     ⚠️ 必须用 `is_a_share()` 过滤，不能用 SQL 的 `code LIKE 'sz3%'`。
@@ -86,13 +92,14 @@ def pick_codes(con: sqlite3.Connection, n_total: int, seed: int) -> list[str]:
     return sorted(picked)
 
 
-def scan(price: pd.DataFrame, high_raw: pd.DataFrame,
+def scan(price: pd.DataFrame, high_raw: pd.DataFrame, low_raw: pd.DataFrame,
          close_raw: pd.DataFrame, label: str) -> dict:
     """逐股找超限跳空，并按「是否真实封板 / 新股窗口」分类。
 
     price:     待检价格面板（索引=日期 int32，列=代码）
-    high_raw:  原始未复权最高价面板，用于 close==high 交叉验证
-    close_raw: 原始未复权收盘价面板（与 high_raw 同形状，便于逐列比较）
+    high_raw:  原始未复权最高价面板，用于 close==high（涨停）交叉验证
+    low_raw:   原始未复权最低价面板，用于 close==low（跌停）交叉验证
+    close_raw: 原始未复权收盘价面板（与上面同形状，便于逐列比较）
 
     ⚠️ 性能：不能用 panel.at[(date, (code, "high"))]，那是 O(n) 的
        MultiIndex 查找，2611 日 × 800 股会跑到十几分钟。
@@ -105,10 +112,19 @@ def scan(price: pd.DataFrame, high_raw: pd.DataFrame,
         s = price[c].to_numpy(dtype=float)
         r = ret[c].to_numpy(dtype=float)
         hi = high_raw[c].to_numpy(dtype=float)
+        lo_raw = low_raw[c].to_numpy(dtype=float)
         cl = close_raw[c].to_numpy(dtype=float)
         lim = limit_of(c)
-        mx = max_tolerance(lim)
-        over = np.where(np.abs(r) > mx)[0]
+        # ⚠️ 预筛必须用 **min_tolerance**（容差下界），不能用 max_tolerance。
+        #    max_tolerance 比逐日精确容差更宽，用它筛选等于
+        #    「用宽标准挑严标准要的东西」——
+        #    落在 (精确容差, 兜底阈值] 区间的真实超限记录会被静默丢弃。
+        #    实测踩过：sh600000 2016-06-23 跌 -12.13%，
+        #    精确容差 10.10% 应判超限，兜底 13.46% 把它筛掉了；
+        #    800 只样本因此丢了 85 条（占精确判定的 10.65%）。
+        #    预筛的下界语义是「任何价位都不可能超限」，故取最小容差。
+        lo = min_tolerance(lim)
+        over = np.where(np.abs(r) > lo)[0]
         if len(over) == 0:
             continue
         # ⚠️ 交易日序号必须按**实际有行情的天数**累计，不能用面板行号 i。
@@ -126,9 +142,17 @@ def scan(price: pd.DataFrame, high_raw: pd.DataFrame,
             prev = float(s[i - 1])
             close = float(s[i])
             tol = price_tolerance(prev, lim)
-            # 真实封板：原始收盘 == 原始最高（两者都取未复权口径）
-            sealed = bool(np.isfinite(hi[i]) and np.isfinite(cl[i])
-                          and abs(hi[i] - cl[i]) < TICK)
+            # 真实封板：原始收盘 == 原始最高（涨停）或 == 原始最低（跌停）。
+            # ⚠️ 只判涨停会漏掉跌停：跌停日 close==low 而非 close==high。
+            #    实测 150 只样本里 343 条「真污染」绝大多数是真实跌停
+            #    （sz002076 1.37→1.23 正是 round(1.37×0.9, 2)=1.23 的跌停价）。
+            #    涨跌停取整方向相反：涨停向上、跌停向下，
+            #    所以跌停幅度**总小于**price_tolerance（按涨停算的上界），判据安全。
+            closed_high = bool(np.isfinite(hi[i]) and np.isfinite(cl[i])
+                               and abs(hi[i] - cl[i]) < TICK)
+            closed_low = bool(np.isfinite(lo_raw[i]) and np.isfinite(cl[i])
+                              and abs(lo_raw[i] - cl[i]) < TICK)
+            sealed = closed_high or closed_low
             td = int(seq[i])
             rows.append({
                 "code": c, "board": board_of(c),
@@ -167,19 +191,20 @@ def main() -> int:
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     builder = AdjustedPriceBuilder()
 
-    codes = pick_codes(con, args.samples, args.seed)
+    codes = pick_codes(args.samples, args.seed)
     dist = {board_cn(c): 0 for c in codes}
     for c in codes:
         dist[board_cn(c)] += 1
     print(f"抽样 {len(codes):,} 只  分层 {dist}")
 
     q = f"""
-    SELECT date, code, close, high FROM bar_daily
+    SELECT date, code, close, high, low FROM bar_daily
      WHERE date BETWEEN ? AND ? AND code IN ({','.join('?' * len(codes))})
     """
     raw = pd.read_sql(q, con, params=[args.start, args.end, *codes])
     price_raw = raw.pivot(index="date", columns="code", values="close").sort_index()
     high_raw = raw.pivot(index="date", columns="code", values="high").sort_index()
+    low_raw = raw.pivot(index="date", columns="code", values="low").sort_index()
     print(f"行情面板 {price_raw.shape[0]:,} 日 × {price_raw.shape[1]:,} 只")
 
     price_adj = builder.adjust_frame(price_raw, "close")
@@ -189,10 +214,10 @@ def main() -> int:
               f"{'...' if len(missing) > 6 else ''}")
         keep = [c for c in price_adj.columns if c not in missing]
         price_raw, price_adj = price_raw[keep], price_adj[keep]
-        high_raw = high_raw[keep]
+        high_raw, low_raw = high_raw[keep], low_raw[keep]
 
-    r_raw = scan(price_raw, high_raw, price_raw, "未复权")
-    r_adj = scan(price_adj, high_raw, price_raw, "后复权")
+    r_raw = scan(price_raw, high_raw, low_raw, price_raw, "未复权")
+    r_adj = scan(price_adj, high_raw, low_raw, price_raw, "后复权")
 
     print()
     print("=" * 78)
@@ -205,7 +230,7 @@ def main() -> int:
         print(f"{k:<16}{a:>16.3f}{b:>16.3f}{b - a:>+16.3f}")
     print()
     print("  超限数 = 涨跌幅超过该股当日真实涨停阈值的记录数")
-    print("  真实封板 = close == high 的部分，是真行情")
+    print("  真实封板 = close==high（涨停）或 close==low（跌停），是真行情")
     print("  新股窗口 = 上市前 5 个交易日（注册制无涨跌幅限制）")
     print("  真污染 = 超限且两者都不是 = 复权失败")
 
