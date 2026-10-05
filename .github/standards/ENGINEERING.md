@@ -98,8 +98,8 @@ git diff --quiet main <分支> && echo "内容已并入 main"
 
 **Review 子 agent 必须被明确要求做两件事**：
 1. 按本文档逐条核对
-2. **同时对照 `.github/standards/PITFALLS.md` 的 P1~P18 逐条核对**
-   —— 那里有 18 条实证踩坑，是唯一记录"哪些做法真实失败过"的地方
+2. **同时对照 `.github/standards/PITFALLS.md` 的 P1~P19 逐条核对**
+   —— 那里有 19 条实证踩坑，是唯一记录"哪些做法真实失败过"的地方
 
 ---
 
@@ -360,7 +360,7 @@ WORKSPACE = Path(r"C:\Documentation\Wealth_Management")
 - [ ] 第三方 API 调用已用 `inspect.signature` 验证过签名
 
 **数据与结论**（涉及因子/回测时必查）
-- [ ] **PITFALLS.md 的 P1~P18 已逐条核对**
+- [ ] **PITFALLS.md 的 P1~P19 已逐条核对**
 - [ ] 回测前已跑 `audit_data_quality.py`，偏差 < 0.5pp/年
 - [ ] 绩效声明含四要素（年化口径 / 成本假设 / 基准 / 多空方向）
 - [ ] 看了净收益，不只看 IC（高 IC = 高换手）

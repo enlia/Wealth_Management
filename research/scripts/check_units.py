@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from factor_lab.config import DB_PATH, MARKET_CAP_UNIT  # noqa: E402
+from factor_lab.config import DB_PATH, MARKET_CAP_UNIT, YI_TO_WAN  # noqa: E402
 
 # 抽查标的：沪深主板 + 创业板 + 保险 + 宁德，覆盖不同量级
 PROBES = [
@@ -64,7 +64,7 @@ def check_self_consistency(con: sqlite3.Connection) -> list[str]:
             continue
         price, mktcap, shares = float(r[0]), float(r[1]), float(r[2])
         # 万元 / (亿股) → 元/股
-        implied = mktcap / 1e4 / shares
+        implied = mktcap / YI_TO_WAN / shares   # 万元 → 亿元 / 亿股 = 元/股
         err = abs(implied - price) / price
         ok = err < 0.01
         mark = "✓" if ok else "✗ 量纲错误"
@@ -96,7 +96,10 @@ def check_against_tushare(con: sqlite3.Connection) -> list[str]:
     print("-" * 72)
 
     df = pd.read_parquet(tpath)
-    df = df[df["trade_date"].astype(str) == "20260930"]
+    # ⚠️ 取最新交易日，不能硬编码 —— 数据会滚动，写死日期会每天误报失败
+    latest = df["trade_date"].astype(str).max()
+    df = df[df["trade_date"].astype(str) == latest]
+    print(f"（对比日期：{latest}，自动取Tushare 最新交易日）")
 
     for code, ts, name in PROBES:
         t = df[df["ts_code"] == ts]
