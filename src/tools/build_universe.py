@@ -160,7 +160,9 @@ def load_sectors():
             p = line.rstrip("\n").split("\t")
             if len(p) < 3 or not p[2]:
                 continue
-            code, name, members = p[0], p[1], p[2].split(",")
+            # 板块代码 p[0] 本脚本用不到（只取 名称 + 成分），
+            # 但保留读取以便发现格式异常（列数不对时 p[0] 会是垃圾值）
+            _code, name, members = p[0], p[1], p[2].split(",")
             for s in members:
                 m.setdefault(s, []).append(name)
     df = pd.DataFrame([{"代码": k, "所属板块": "|".join(v),

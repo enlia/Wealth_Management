@@ -160,7 +160,7 @@ def main() -> int:
     idx_ret = idxtbl.set_index("date")["close"].pct_change()
     bench = float(idx_ret.mean() * TRADING_DAYS)
 
-    ew = p_ret = prices.pct_change().mean(axis=1)
+    ew = prices.pct_change().mean(axis=1)
     bench_ew = float(ew.mean() * TRADING_DAYS)
 
     print("\n" + "=" * 92)

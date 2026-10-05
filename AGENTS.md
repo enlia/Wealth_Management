@@ -60,7 +60,8 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | 文件                                 | 内容                               | 行数 |
 | ------------------------------------ | ---------------------------------- | ---- |
 | `.github/standards/ENGINEERING.md` | **工程规范全文，最高优先级** | —  |
-| `.github/standards/PITFALLS.md`    | 19 条技术踩坑（含 6 条结论反转）   | 462  |
+| `.github/standards/PITFALLS.md`    | 金融与数据踩坑（20 条，6 条结论反转） | —  |
+| `.github/standards/TOOLING.md`     | 工具链踩坑（lint / git / CI / 依赖）  | —  |
 
 ---
 
@@ -193,7 +194,7 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 
 ---
 
-## 三、技术踩坑速查（详见 .github/standards/PITFALLS.md）
+## 三、技术踩坑速查（详见 .github/standards/）
 
 19 条技术坑全部为项目实证，**每次 review 必须逐条核对**：
 

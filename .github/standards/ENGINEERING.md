@@ -258,25 +258,29 @@ if data is None:
 - 不允许为了"显得严谨"而增加检查 —— 判断标准：
   拿掉这个检查，过去一年会漏掉几个真错？答不出就删掉
 
-### 本项目保留的检查点
+### 检查点：手动 vs CI 自动
 
-⚠️ **必须诚实区分「自动阻断」与「手动运行」**。
+⚠️ **必须诚实区分「CI 阻断」与「手动运行」**。
 把手动脚本说成门禁是自我欺骗 —— 它拦不住任何东西。
 
-| 检查点 | 拦下过什么 | 自动阻断 |
+| 检查点 | 拦下过什么 | 阻断方式 |
 |---|---|---|
-| `pre-commit`（`.git/hooks/`） | 40 个提交被工具身份污染 | ✅ 是 |
-| `audit_data_quality.py` | 2.33pp 年化偏差（+29.5% → +53.6%） | ❌ 手动 |
-| `verify_tushare_data.py` | 接口静默截断 | ❌ 手动 |
-| `verify_imports.py` | joblib 隐式依赖，4脚本连锁失败 | ❌ 手动 |
+| `verify_imports.py` | joblib 隐式依赖，4 脚本连锁失败 | ✅ **CI** |
+| 行数 ≤ 500 | AGENTS.md 曾 579 行 | ✅ **CI** |
+| git 作者身份 | 40 个提交被工具身份污染 | ✅ **CI** |
+| F841 未使用变量 | `adj_i` 建索引却从未查询 | ✅ **CI** |
+| `pre-commit` | git 身份（同上，提交前即时拦） | ✅ 本地 hook |
+| `audit_data_quality.py` | 2.33pp 年化偏差 | ❌ 手动（需数据库） |
+| `check_units.py` | 市值量纲差 1 万倍 | ❌ 手动（需 Tushare 对比） |
 
-**「不予合并」目前无自动化执行机制**，全靠人工遵守。
-若要变成真门禁，需补 `.pre-commit-config.yaml`（当前不存在）
-把 `verify_imports.py` 挂进去 —— 它成本最低（单进程 runpy），
-能防「换环境连锁崩溃」。
+**CI 配置**：`.github/workflows/ci.yml`，4 项检查，`main` 分支 push 与 PR 均触发。
 
-⚠️ `pre-commit` 无法随仓库分发：`.git/hooks/` 与 `.git/config`
-都不被 git 跟踪。换机器克隆后需重新安装。
+**为什么有些检查不进 CI**：`data/` 与 `runtime/` 都在 .gitignore，
+CI 上没有 `market.db`、没有 Tushare 数据。硬跑必然失败，
+那是「设计失效的门禁」而非有效门禁。这类检查靠规范强制手动执行。
+
+⚠️ `pre-commit` 无法随仓库分发（`.git/hooks/` 不被 git 跟踪），
+换机器克隆后需重新安装。**CI 不受此限制** —— 这是它的主要价值。
 
 ### 新增门禁的前置问题
 

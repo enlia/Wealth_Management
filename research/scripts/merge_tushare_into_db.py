@@ -79,8 +79,6 @@ def merge_adj(con, dry_run: bool) -> int:
     adj = adj[mask]
     print(f"  剔除上市前填充 {int(dropped):,} 行后剩 {len(adj):,} 行")
 
-    # 建索引
-    adj_i = adj.set_index(["code", "dnum"])["adj_factor"]
     n_upd = 0
     t0 = time.perf_counter()
     for i, c in enumerate(adj["code"].unique()):
