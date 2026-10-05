@@ -25,31 +25,66 @@
 
 ---
 
-## 一、Git 工作流：分支 + 评审 + 合并
+## 一、Git 工作流：分支 + 评审 + PR 合并
 
 ### 强制流程（无例外）
 
 ```
 1. 从 main 拉新分支       git switch -c feat-<简述>
 2. 在分支上开发 + 小步提交
-3. 派子 agent 做 review   明确要求它按本文档逐条核对
-4. review 通过后才合并    git switch main && git merge <分支>
-5. 合并后删除该分支
+3. 派子 agent 做 review明确要求它按本文档 + PITFALLS 逐条核对
+4. review 通过后推送      git push -u origin <分支>
+5. 在 GitHub 上开 PR      https://github.com/enlia/Wealth_Management/compare/main...<分支>
+6. PR 合并到 main        （网页点 Merge，或 gh pr merge）
+7. 保留分支              ⚠️ 合并后不删除，保留作历史记录
 ```
+
+### 为什么必须走 GitHub PR
+
+| 原因 | 说明 |
+|---|---|
+| **留痕** | PR 页面永久记录「讨论了什么、改了什么、谁review 的」 |
+| **可追溯** | 出问题能回到任一 PR 看当时的 diff 与评审意见 |
+| **强制 review 留档** | 合并记录里有 review 结论，不依赖对话历史 |
+| **防止误合并** | PR 界面能一眼看出改动范围，比 `git merge` 盲合安全 |
+
+**禁止** `git switch main && git merge <分支>` 直接在本地合并 ——
+这绕过了 PR，评审记录无处存放。
 
 ### 规则
 
 | 规则 | 说明 |
 |---|---|
-| **禁止直推 main** | 任何提交必须先在分支上，经review |
+| **禁止直推 main** | 任何提交必须先在分支上，经 review + PR |
 | **分支命名** | `feat-` `fix-` `refactor-` `docs-` + 简述，英文小写连字符 |
 | **合并前必须有 review 结论** | 记录 review 发现了什么、改了什么 |
 | **一个分支一件事** | 不把无关改动混进同一分支 |
+| **合并后保留分支** | 不执行 `git branch -d` 与 `git push origin --delete` |
+
+### 合并后保留分支的依据
+
+GitHub **对分支数量无强制上限**（官方推荐 5,000 个以内，
+超出会导致 fetch 变慢，不影响正常使用）。
+StackOverflow 与 GitHub 官方文档的结论：
+
+- Git 本身：分支就是一个含 40 字节 SHA 的引用文件，磁盘占用约 4KB
+- GitHub：无硬限制，官方仅「建议 5,000 以内」以保证性能
+- 性能软上限：建议 1,000 个 ref 以内
+
+因此**保留已合并分支不会触及任何限制**，反而有可追溯价值。
+若日后分支数逼近数百，可批量归档：
+
+```bash
+# 列出所有已合并分支（确认无误后再考虑清理）
+git branch --merged main --format='%(refname:short)'
+```
+
+⚠️ 任何清理操作前先确认分支已合并、内容已进入 main。
 
 **Review 子 agent 必须被明确要求做两件事**：
 1. 按本文档逐条核对
 2. **同时对照 `.github/standards/PITFALLS.md` 的 P1~P18 逐条核对**
-   ——那里有18 条实证踩坑，是唯一记录"哪些做法真实失败过"的地方
+   —— 那里有 18 条实证踩坑，是唯一记录"哪些做法真实失败过"的地方
 
 ---
 
