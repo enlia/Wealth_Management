@@ -129,27 +129,36 @@ def judge_limit_rules(
     """
     lim = limit_of(code)
     pc = quoted_prev_close.reindex(ret.index)
-    # 前收盘无效时退化为名义限幅（此时不判超限，见下方 ok &= pc > 0）
+    # 前收盘无效时退化为名义限幅（下方 ok &= pc > 0 会把该日排除）
     tol = np.array(
         [price_tolerance(float(p), lim) if p > 0 else lim
          for p in pc.to_numpy()],
         dtype=float,
     )
-    ok = ret.abs().to_numpy() <= tol
-    # 新股无涨跌幅窗口内不判超限。
-    # ⚠️ 必须传 first_trade_date：2023-02-17 之前上市的主板新股不适用
-    #    「前 5 日无限幅」，漏传会把它们的新股窗口多算 4 天。
-    ok &= ~np.array([no_limit_days(code, int(i), first_trade_date)
-                     for i in trade_day_idx])
-    # 前收盘无效（非正）时无法判定，不计入异常
-    ok &= (pc > 0).to_numpy()
-    return pd.Series(~ok, index=ret.index)
+    # ⚠️ 三个条件是「与」关系：超限 = 涨幅超阈值 且 不在无限幅窗口 且 前收有效。
+    #
+    #    实测踩过的坑：写成 `ok = within_tol & ~in_window` 再 `return ~ok`，
+    #    语义反了 —— 窗口内的日子 ok=False，取反后被判成超限，
+    #    200 只样本里 13 条「规则内超限」有 11 条是窗口内日子被误计。
+    #    排除必须作用在「超限」上，不能靠二次取反。
+    over = np.abs(ret.to_numpy()) > tol
+    # 新股无限幅窗口内不判超限（该日再涨也算规则内）。
+    # ⚠️ 必须传 first_trade_date：2023-02-17 前上市的主板新股
+    #    不适用「前 5 日无限幅」，漏传会把窗口多算 4 天。
+    # ⚠️ 用 np.logical_not 而不是 `~`：后者是按位取反，Python 3.16 起废弃。
+    in_window = np.array([no_limit_days(code, int(i), first_trade_date)
+                          for i in trade_day_idx], dtype=bool)
+    over &= np.logical_not(in_window)
+    # 前收盘无效（非正或NaN）时无法判定，不计入异常
+    over &= (pc > 0).to_numpy()
+    return pd.Series(over, index=ret.index)
 
 
 def clean_returns(
     prices: pd.DataFrame,
     quoted_prev: pd.DataFrame | None = None,
     use_rules: bool = False,
+    timeline: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """清洗收益率，返回 (干净收益率, 异常标记)。
 
@@ -164,10 +173,16 @@ def clean_returns(
         否则容差基准错误（见 ``judge_limit_rules`` 的警告）。
         缺省退化为 ``prices.shift(1)``，仅当 prices 本身就是报价时才正确。
     use_rules : True 时用 market_rules 的价格感知容差 + 新股窗口判定。
+    timeline : **未复权**价格面板，仅用于确定「交易日序号」与首个行情日。
+        ⚠️ 检验 ``close_adj`` 时**必须**传入：
+        close_adj 有 NULL（1.6% 的 A 股行）时，用它自己的非空位置算序号会
+        把位置整体前移/后移，导致新股无涨跌幅窗口判定错位 ——
+        实测会让异常数从112 条虚高到 11,183 条（100 倍）。
     """
     ret = prices.pct_change(fill_method=None)
     bad = pd.DataFrame(False, index=ret.index, columns=ret.columns)
     prev_close = prices.shift(1) if quoted_prev is None else quoted_prev
+    tl = prices if timeline is None else timeline
 
     for c in ret.columns:
         s = prices[c].dropna()
@@ -182,8 +197,9 @@ def clean_returns(
             continue
         if use_rules:
             pc = prev_close[c].reindex(r.index)
-            # 该股序列内的序号：按有效价格位置对齐
-            valid = prices[c].dropna().index
+            # 交易日序号用**未复权时间线**（timeline），不用 close_adj 自身：
+            # 后者有 NULL 时位置会错位，把新股窗口判到错误的日期上。
+            valid = tl[c].dropna().index if c in tl else prices[c].dropna().index
             pos = {d: i + 1 for i, d in enumerate(valid)}
             tdi = pd.Series([pos.get(d, 1) for d in r.index], index=r.index)
             # 首个行情日（YYYYMMDD），用于判断是否适用注册制新股 5 日窗口
@@ -205,15 +221,17 @@ def audit_price_data(
     verbose: bool = True,
     use_rules: bool = True,
     quoted_prev: pd.DataFrame | None = None,
+    timeline: pd.DataFrame | None = None,
 ) -> dict:
     """价格数据体检。
 
     use_rules=True（默认）用 ``market_rules`` 的价格感知容差 + 新股窗口判定。
-    quoted_prev 为**未复权**前收盘价面板；检验 close_adj 时**必须**传入，
-    否则会用后复权价算容差，把合法涨跌停误判成超限。
+    quoted_prev / timeline 为**未复权**面板；检验 close_adj 时**必须**传入，
+    否则会用后复权价算容差、把合法涨跌停误判成超限。
     """
     ret = prices.pct_change(fill_method=None)
-    clean, bad = clean_returns(prices, quoted_prev=quoted_prev, use_rules=use_rules)
+    clean, bad = clean_returns(prices, quoted_prev=quoted_prev,
+                               use_rules=use_rules, timeline=timeline)
     n_tot = int(ret.notna().sum().sum())
     n_bad = int(bad.sum().sum())
     abs_all = float(ret.abs().stack().sum())
@@ -239,9 +257,10 @@ def audit_price_data(
         "n_days": int(prices.shape[0]),
         "n_ret": n_tot,
         "n_bad": n_bad,
-        "pct_bad": n_bad / n_tot,
         "n_first_day": n_first,
         "n_other": n_other,
+        # 关卡只看「规则内超限」，上市首日本就无前收、不该算异常
+        "pct_bad": n_other / n_tot,
         "abs_share_bad": abs_bad / abs_all if abs_all else np.nan,
         "ew_buy_hold_raw": float(b_raw - 1),
         "ew_buy_hold_clean": float(b_clean - 1),
@@ -299,16 +318,19 @@ def main() -> int:
             "    uv run python research/scripts/merge_tushare_into_db.py"
         )
     # 涨跌停容差必须按【未复权】前收盘价算 —— 限幅约束的是报价，与复权无关
-    quoted_prev = load_prices(codes, args.start, args.end, field="close").shift(1)
+    quoted_panel = load_prices(codes, args.start, args.end, field="close")
+    quoted_prev = quoted_panel.shift(1)
     # audit_price_data 内部直接打印全部结果（verbose=True），
     # 返回的 dict 仅作调用方备用，此处无需接收。
-    out = audit_price_data(prices, quoted_prev=quoted_prev)
+    out = audit_price_data(prices, quoted_prev=quoted_prev,
+                             timeline=quoted_panel)
 
     print()
     print("=" * 70)
     print("逐板块异常分布")
     print("=" * 70)
-    _, bad = clean_returns(prices, quoted_prev=quoted_prev, use_rules=True)
+    _, bad = clean_returns(prices, quoted_prev=quoted_prev,
+                             use_rules=True, timeline=quoted_panel)
     for b in ["main", "gem", "star", "bse"]:
         cols = [c for c in prices.columns if board_of(c) == b]
         if not cols:
