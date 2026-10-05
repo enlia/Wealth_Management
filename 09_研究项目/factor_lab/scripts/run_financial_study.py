@@ -171,8 +171,18 @@ def build_financial_factors(
     return out
 
 
+MIN_GROUP_SIZE = 5
+"""中性化时的最小组内样本数（见 neutralize 的说明）。
+
+取值权衡：格子 = 行业 × 市值分位。全市场约 4,900 只、约 100 个行业标签、
+市值分 5 档 → 平均每格约 10 只。因此阈值不能设大（20 会让中性化几乎失效），
+也不能设 1~2（会把整个横截面压成常数）。5 是可用折中。
+"""
+
+
 def neutralize(s: pd.Series, industry: np.ndarray,
-               mktcap: np.ndarray | None = None) -> pd.Series:
+               mktcap: np.ndarray | None = None,
+               min_group: int = MIN_GROUP_SIZE) -> pd.Series:
     """行业中性化（可选叠加市值中性化）。
 
     为什么必须做：财务因子与市值、行业高度共线。
@@ -180,6 +190,9 @@ def neutralize(s: pd.Series, industry: np.ndarray,
         不控市值的话「价值因子」实测到的其实是「小市值因子」。
       · roe 天然高 ↔ 传统行业（银行、地产）；行业轮动会让结果被行业主导。
     做法：逐日对因子在 (行业 × 市值分位组) 内去均值。
+          组内样本 < min_group 的格子【不去均值】、保留原值——否则细分组里
+          只有 1~2 只股票时，去均值会把它们全压成 0.0，整个横截面变成常数，
+          alphalens 分组全部 NaN，报 MaxLossExceededError 100%。
 
     ⚠️ 踩坑：索引是 MultiIndex(date, asset)，`groupby(cols, level=0)` 会把
        【列名当索引层】去映射（"ind" 在第 0 层找不到），
@@ -201,7 +214,12 @@ def neutralize(s: pd.Series, industry: np.ndarray,
         keys = ["_date", "ind", "capq"]
     else:
         keys = ["_date", "ind"]
-    return tmp["f"] - tmp.groupby(keys)["f"].transform("mean")
+    grp = tmp.groupby(keys)["f"]
+    cnt = grp.transform("size")
+    mu = grp.transform("mean")
+    # ⚠️ np.where 返回 ndarray，必须包回 Series 才能保留 (date, asset) 索引
+    out = np.where(cnt >= min_group, tmp["f"] - mu, tmp["f"])
+    return pd.Series(out, index=s.index, name=s.name)
 
 
 def pick_sample(codes: list[str], n: int, seed: int = 42) -> list[str]:
