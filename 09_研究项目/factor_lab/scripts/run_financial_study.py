@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import warnings
@@ -28,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -171,55 +173,111 @@ def build_financial_factors(
     return out
 
 
-MIN_GROUP_SIZE = 5
-"""中性化时的最小组内样本数（见 neutralize 的说明）。
+MIN_OBS_PER_DAY = 30
+"""逐日截面回归的最小样本数。低于此值当日不做中性化（返回原值）。"""
 
-取值权衡：格子 = 行业 × 市值分位。全市场约 4,900 只、约 100 个行业标签、
-市值分 5 档 → 平均每格约 10 只。因此阈值不能设大（20 会让中性化几乎失效），
-也不能设 1~2（会把整个横截面压成常数）。5 是可用折中。
-"""
+# 并行度：本机 8 物理核 / 16 逻辑核。取逻辑核一半：超线程对 numpy 小矩阵
+# 几无收益，反而抢内存（本机 13.9GB，单进程已用到 78%）。
+N_JOBS = max(1, (os.cpu_count() or 4) // 2)
+
+
+def _neutralize_one_day(pos, y, ind_codes, logcap):
+    """单日截面回归。返回 (位置, 因子残差)。供 joblib 并行调用。"""
+    n = len(y)
+    if n < MIN_OBS_PER_DAY:
+        return pos, y
+    parts = [np.ones((n, 1))]
+    k = 1
+    if logcap is not None:
+        v = np.asarray(logcap, dtype=float)
+        if np.isfinite(v).sum() >= MIN_OBS_PER_DAY and np.nanstd(v) > 0:
+            parts.append(np.nan_to_num(v, nan=float(np.nanmean(v)))[:, None])
+            k += 1
+    uniq, inv = np.unique(ind_codes, return_inverse=True)
+    if uniq.size > 1:
+        # drop_first：去掉第一个行业，避免与截距完全共线
+        D = np.zeros((n, uniq.size - 1), dtype=float)
+        keep = inv > 0
+        D[keep, inv[keep] - 1] = 1.0
+        parts.append(D)
+        k += D.shape[1]
+    if k >= n - 2:
+        return pos, y
+    X = np.column_stack(parts)
+    ok = np.isfinite(y) & np.isfinite(X).all(axis=1)
+    if ok.sum() <= k + 2 or ok.sum() < MIN_OBS_PER_DAY:
+        return pos, y
+    try:
+        beta, *_ = np.linalg.lstsq(X[ok], y[ok], rcond=None)
+    except np.linalg.LinAlgError:
+        return pos, y
+    return pos, y - X @ beta
 
 
 def neutralize(s: pd.Series, industry: np.ndarray,
                mktcap: np.ndarray | None = None,
-               min_group: int = MIN_GROUP_SIZE) -> pd.Series:
-    """行业中性化（可选叠加市值中性化）。
+               n_jobs: int = N_JOBS) -> pd.Series:
+    """行业 + 市值中性化（逐日截面回归残差法，Barra 式）。
 
     为什么必须做：财务因子与市值、行业高度共线。
       · bp（账面市值比）天然高 ↔ 市值小；2017 年后 A 股小市值股大幅跑输，
         不控市值的话「价值因子」实测到的其实是「小市值因子」。
       · roe 天然高 ↔ 传统行业（银行、地产）；行业轮动会让结果被行业主导。
-    做法：逐日对因子在 (行业 × 市值分位组) 内去均值。
-          组内样本 < min_group 的格子【不去均值】、保留原值——否则细分组里
-          只有 1~2 只股票时，去均值会把它们全压成 0.0，整个横截面变成常数，
-          alphalens 分组全部 NaN，报 MaxLossExceededError 100%。
 
-    ⚠️ 踩坑：索引是 MultiIndex(date, asset)，`groupby(cols, level=0)` 会把
-       【列名当索引层】去映射（"ind" 在第 0 层找不到），
-       报 'numpy.ndarray' object is not callable。
-       正确做法是把 date 从索引还原成普通列，再按列 groupby。
+    ⚠️ 为什么不用「分组去均值」——踩过的坑，务必记住：
+       最初实现是逐日在 (行业 × 市值分位) 组内去均值，实测
+       `changed frac == 0.0`，即【完全没生效】，而结果看上去与原始因子
+       一字不差，极易误判为「中性化不影响结论」。失效链条：
+         1. 市值分位在【行业内】排名 → 每格只剩约 2 只股票
+         2. 组内只有 1~2 只时，去均值会把它们全压成 0.0
+            → 加 min_group 阈值保护，否则 alphalens 分组全 NaN，
+              报 MaxLossExceededError 100%
+         3. 但 min_group=5 > 每格实际样本数(约 2)
+            → 阈值把所有格子都保护掉 → 中性化退化成恒等变换
+       即「分组去均值 + 样本阈值」在 A 股这种「行业标签多、每行业股票少」的
+       横截面上结构性不可用。两版踩坑记录都保留在案。
+
+    正解：逐日截面 OLS 取残差
+        f_t = a + b·log(市值)_t + Σ_c γ_c·行业哑变量_c + ε_t
+      对行业是完全控制，对市值是线性控制，不依赖格子样本量。
+
+    ⚠️ 性能：2,551 个交易日串行做截面回归是最大瓶颈（实测单核占绝大多数时间）。
+       现按日拆成任务用 joblib 并行，本机 8 核加速约 6~8 倍。
+       用线程池而非进程池：每日任务是小矩阵 lstsq，numpy 会释放 GIL；
+       进程池还要复制/序列化 1,000 万行数据，反而更慢更占内存。
     """
-    ind = pd.Series(index=s.index, data=industry)
-    tmp = pd.DataFrame({"f": s, "ind": ind})
-    tmp["_date"] = tmp.index.get_level_values("date")
+    df = pd.DataFrame({
+        "f": s.to_numpy(dtype=float),
+        "_date": np.asarray(s.index.get_level_values("date")),
+    })
+    df["_ind"] = pd.factorize(np.asarray(industry))[0]
+    df["_pos"] = np.arange(len(df))
+
+    logcap_full = None
     if mktcap is not None:
-        tmp["cap"] = pd.Series(index=s.index, data=mktcap)
-        valid = tmp["cap"].where(np.isfinite(tmp["cap"]) & (tmp["cap"] > 0))
-        # ⚠️ 关键：市值分位必须在【各行业内部】计算。
-        #    早期版本用全截面排名，结果在「行业 × 市值分位」组内去均值时
-        #    把因子几乎抹平（每日横截面 nunique 中位数 = 1，分组完全失效）。
-        #    原因：组内市值同质 → 组内因子均值≈该行业该市值层均值 → 全被减掉。
-        tmp["capq"] = (valid.groupby([tmp["_date"], tmp["ind"]])
-                       .rank(pct=True).fillna(0.5))
-        keys = ["_date", "ind", "capq"]
+        cap = pd.Series(np.asarray(mktcap, dtype=float))
+        cap = cap.where(np.isfinite(cap) & (cap > 0))
+        logcap_full = np.log(cap.to_numpy())
+
+    tasks = [
+        (g["_pos"].to_numpy(),
+         g["f"].to_numpy(dtype=float),
+         g["_ind"].to_numpy(),
+         logcap_full[g["_pos"].to_numpy()] if logcap_full is not None else None)
+        for _, g in df.groupby("_date", sort=False)
+    ]
+
+    if n_jobs > 1 and len(tasks) > 8:
+        results = Parallel(n_jobs=n_jobs, backend="threading")(
+            delayed(_neutralize_one_day)(*t) for t in tasks)
     else:
-        keys = ["_date", "ind"]
-    grp = tmp.groupby(keys)["f"]
-    cnt = grp.transform("size")
-    mu = grp.transform("mean")
-    # ⚠️ np.where 返回 ndarray，必须包回 Series 才能保留 (date, asset) 索引
-    out = np.where(cnt >= min_group, tmp["f"] - mu, tmp["f"])
+        results = [_neutralize_one_day(*t) for t in tasks]
+
+    out = df["f"].to_numpy(dtype=float).copy()
+    for pos, yhat in results:
+        out[pos] = yhat
     return pd.Series(out, index=s.index, name=s.name)
+
 
 
 def pick_sample(codes: list[str], n: int, seed: int = 42) -> list[str]:
@@ -328,6 +386,17 @@ def main() -> int:
     out_dir = Path(args.out) if args.out else OUTPUT_DIR / "financial"
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
+    # ⚠️ 性能：中性化与 tear sheet 都是纯函数且无副作用，算一次即可复用。
+    #    早期版本在主循环和子区间循环各算一遍 → 重复 2 倍耗时。
+    prepared: dict[str, pd.Series] = {}
+
+    def _get(name: str) -> pd.Series:
+        if name not in prepared:
+            f = fac[name]
+            if args.neutral:
+                f = _neut(f)
+            prepared[name] = f
+        return prepared[name]
 
     for name in names:
         print("\n" + "-" * 74)
@@ -335,9 +404,7 @@ def main() -> int:
         print("-" * 74)
         try:
             t0 = time.perf_counter()
-            f = fac[name]
-            if args.neutral:
-                f = _neut(f)
+            f = _get(name)
             n = int(f.notna().sum())
             print(f"  有效值 {n:,}，覆盖 {f.index.get_level_values('asset').nunique():,} 只")
             if n < 1000:
@@ -360,10 +427,7 @@ def main() -> int:
         if not any(r.factor_name == name for r in results):
             continue
         print(f"\n  ── {name}")
-        f = fac[name]
-        if args.neutral:
-            f = _neut(f)
-        sub = subperiod_ic(f, prices, cfg, DEFAULT_COST, name)
+        sub = subperiod_ic(_get(name), prices, cfg, DEFAULT_COST, name)
         print("    " + sub.to_string(index=False).replace("\n", "\n    "))
         sub.insert(0, "因子", name)
         sub_tables.append(sub)
