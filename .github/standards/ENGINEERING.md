@@ -30,10 +30,10 @@
 ### 强制流程（无例外）
 
 ```
-1. 从 master 拉新分支     git switch -c feat/<简述>
+1. 从 main 拉新分支       git switch -c feat-<简述>
 2. 在分支上开发 + 小步提交
 3. 派子 agent 做 review   明确要求它按本文档逐条核对
-4. review 通过后才合并    git switch master && git merge <分支>
+4. review 通过后才合并    git switch main && git merge <分支>
 5. 合并后删除该分支
 ```
 
@@ -41,7 +41,7 @@
 
 | 规则 | 说明 |
 |---|---|
-| **禁止直推 master** | 任何提交必须先在分支上，经review |
+| **禁止直推 main** | 任何提交必须先在分支上，经review |
 | **分支命名** | `feat-` `fix-` `refactor-` `docs-` + 简述，英文小写连字符 |
 | **合并前必须有 review 结论** | 记录 review 发现了什么、改了什么 |
 | **一个分支一件事** | 不把无关改动混进同一分支 |
@@ -69,6 +69,7 @@
 | 自动生成物（`uv.lock`、`.workbuddy/`） | ✅ 豁免 | 不手写 |
 | 二进制（`*.pdf`、`*.parquet`） | ✅ 豁免 | 行数无意义 |
 | 数据产出（`results/*.csv`） | ✅ 豁免 | 数据不是代码 |
+| `reference/`（第三方只读参考） | ✅ 豁免 | 外部克隆的代码，改它等于改第三方；且不进版本控制 |
 
 ⚠️ **豁免不等于放任**。文档可以长，但必须有清晰目录结构，
 让人能快速定位到需要的章节（当前 `docs/` 已按主题分三组）。
@@ -282,8 +283,8 @@ assert isinstance(qr, pd.DataFrame), f"alphalens 返回类型变了: {type(qr)}"
 # ❌ 换电脑/换路径即崩
 WORKSPACE = Path(r"C:\Documentation\Wealth_Management")
 
-# ✅ 三级发现：环境变量 WM_ROOT → 向上找含 .git 的祖先目录 → 显式 raise 提示
-#    注意：三级都找不到时报错，不是静默用默认值
+# ✅ 二级发现 + 显式报错：WM_ROOT → 向上找含 .git 的祖先目录
+#    两级都找不到时 raise 并给出修复命令，不静默猜测路径
 ```
 
 **实证**：项目要同步到第二台机器，硬编码路径直接让该需求无法实现。
@@ -295,7 +296,7 @@ WORKSPACE = Path(r"C:\Documentation\Wealth_Management")
 每次提交前逐条核对：
 
 **流程**
-- [ ] 分支不是 master（本次改动都在 feat- fix- refactor- docs- 分支上）
+- [ ] 分支不是 main（本次改动都在 feat- fix- refactor- docs- 分支上）
 - [ ] 已派子agent review，且 review 意见已逐条处理
 - [ ] git 身份 = `enlia <2020621056@qq.com>`（pre-commit 自动校验）
 
