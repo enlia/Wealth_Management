@@ -243,7 +243,7 @@ fina_mainbz / forecast）**全部只支持 `ts_code` 逐只拉**，用 `period` 
 本项目所有提交必须是：
 ```
 user.name  = enlia
-user.email = 18221863568@aliyun.com
+user.email = 2020621056@qq.com
 ```
 
 **为什么强制**：本项目 40 个提交曾全部被标记为 `WorkBuddy <workbuddy@local>`
@@ -269,7 +269,7 @@ git branch backup-before-author-fix    # 先备份
 git tag    backup-before-author-fix
 uv run python research/scripts/rewrite_authors.py \
   --old-name WorkBuddy --old-email workbuddy@local \
-  --new-name enlia --new-email 18221863568@aliyun.com --dry-run
+  --new-name enlia --new-email 2020621056@qq.com --dry-run
 # 确认后去掉 --dry-run，再 git push --force-with-lease
 ```
 
