@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,6 +131,62 @@ TDX_VIPDOC = Path(env_get("TDX_VIPDOC") or next(
     (p for p in _TDX_CANDIDATES if Path(p).exists()),
     _TDX_CANDIDATES[0],          # 都不存在则返回首选，报错信息里会显示它
 ))
+
+
+# ── 单位约定（2026-10-06 统一）──────────────────────────────
+# ⚠️ 量纲错误会彻底污染因子，且不报错，只能靠约定与断言防住。
+#
+# 本项目市值单位统一为**万元**（与 Tushare 的 total_mv / circ_mv 一致）：
+#   1 万万元 = 1 亿元
+#
+# 实测依据（茅台 600519.SH，2026-09-30）：
+#   Tushare total_mv= 157,337,770 万元
+#   ÷ total_share 12.5008 亿股 = 1,258.62 元/股 = 当日收盘价✓
+#   若误当亿元：157,337,770 × 1e4 → 差 1 万倍，量级完全错误
+MARKET_CAP_UNIT = "万元"
+YI_TO_WAN = 1e4                # 亿元 → 万元的乘数
+
+
+def to_wan(yi_value):
+    """亿元 → 万元。
+
+    用于把通达信 universe.csv 的「总市值亿」字段并入统一口径。
+
+    ⚠️ 无法解析的非空输入**一律抛错，不静默转 None**
+    （ENGINEERING.md 第四节：禁止静默 fallback）。
+    静默丢市值会让市值因子失真而不报错 ——
+    实测 `universe.csv` 里 `'15,733.8'`（Excel 千分位导出，很常见）
+    会因`float()` 失败被吞成 NULL，整批市值静默丢失。
+
+    合法透传：None / 空串 / NaN → None（表示「无数据」，不是「转换失败」）。
+    """
+    if yi_value is None:
+        return None
+
+    # 字符串先清洗：容忍千分位与首尾空格
+    if isinstance(yi_value, str):
+        yi_value = yi_value.strip().replace(",", "")
+        if not yi_value:
+            return None
+
+    try:
+        v = float(yi_value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"市值字段无法解析为数字：{yi_value!r}（类型 {type(yi_value).__name__}）\n"
+            f"  可能原因：混入了非数值文本、或千分位格式未被正确处理。\n"
+            f"  处理：修正源数据后重跑，不要让市值静默变NULL —— "
+            f"市值因子会失真但不报错。"
+        ) from e
+
+    if math.isnan(v):
+        return None
+    if math.isinf(v):
+        raise ValueError(
+            f"市值字段为无穷值：{yi_value!r}\n"
+            f"  源数据异常，请检查 universe.csv 是否混入 inf 或除零结果。"
+        )
+    return v * YI_TO_WAN
 
 
 
