@@ -198,6 +198,47 @@ OUT = Path(__file__).resolve().parents[2] / "runtime"
 `WORKSPACE = Path(r"C:\Documentation\Wealth_Management")` 导致项目无法
 搬到第二台电脑——而同步到另一台机器是明确的项目需求。
 
+### 3.15 Tushare 接口的静默失败（2026-10-05 实测，最容易再踩）
+**接口返回 0 行 ≠ 接口不可用。** 最危险的一种失败：参数传错时
+Tushare 既不报错也不返回错误信息，只给一个空表。
+
+实测案例：
+```
+fina_indicator  {'period': '20240630'}   →     0 行   ← 静默失败
+fina_indicator  {'ts_code': '600519.SH'} →   100 行   ✓ 正确用法
+```
+三大报表（income / balancesheet / cashflow / fina_indicator /
+fina_mainbz / forecast）**全部只支持 `ts_code` 逐只拉**，用 `period` 会静默返空。
+
+**→ 强制规则：任何 Tushare 接口，第一次用必须先试 3~4 种参数组合，
+确认哪种真正返回数据，再写进脚本。不能照抄文档示例。**
+
+### 3.16 批量拉取优先（实测请求数可差 100 倍）
+| 接口类型 | 正确方式 | 单次返回 | 用错方式的后果 |
+|---|---|---|---|
+| 日频类（daily_basic / moneyflow / stk_limit） | **按交易日** | 5,561 行 / 0.4s | 按股票拉多花 2 倍请求 |
+| 可按报告期的（stk_holdernumber / pledge_stat / express） | **按 period/quarter** | 5,500 行 | 按股票拉多花 100 倍请求 |
+| 三大报表 | 只能按 `ts_code` | 100 行/次 | 无替代 |
+
+**判断方法**：先测 `{'period': ...}` 返回多少行；为 0 就立刻改按 `ts_code`。
+
+### 3.17 限频导致实际耗时是接口响应时间的 2.5 倍
+限频 180 次/分钟 → 每请求强制间隔 0.33 秒。
+实测按股票拉 20 只耗时 10.7 秒 = 0.52 秒/只。
+**预估耗时时用 0.52s/次，不是接口响应时间**，否则会低估一半以上。
+
+### 3.18 探测结果以实测为准，不以文档为准
+2000 积分实测 **23/27 个接口可用**，其中 6 个官方文档标注高门槛的
+（forecast / express / fina_mainbz / report_rc / stk_holdernumber / pledge_stat）
+实际都能取到——**文档的保守标注低估了实际权限**。
+
+不可用 4 个：`suspend_d`（停复牌）、`top_list`（龙虎榜）、
+`bak_daily`、`cyq_perf`（筹码分布，需 5000 积分）。
+
+完整实测报告：`docs/03_项目报告/11_Tushare2000积分可用能力实测.md`
+探测脚本：`research/scripts/probe_all_interfaces.py`
+补全脚本：`research/scripts/fetch_all_tushare.py`
+
 ---
 
 ## 四、目录职责
