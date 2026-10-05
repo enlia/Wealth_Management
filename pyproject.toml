@@ -25,6 +25,12 @@ dependencies = [
     "matplotlib>=3.9.0",
     "tqdm>=4.66.0",
     "akshare>=1.19.1",
+    # ⚠️ 必须显式声明（2026-10-05 目录重组时踩到）
+    #   run_financial_study.py 用它做中性化的线程池并行（3.14x 加速），
+    #   但之前只靠 akshare → scikit-learn 间接带入。目录重组重建 venv 后
+    #   joblib 没被装上，导致 4 个研究脚本连锁 import 失败。
+    #   教训：直接 import 的包必须显式声明，不能依赖传递依赖。
+    "joblib>=1.4.0",
 ]
 
 [project.optional-dependencies]
