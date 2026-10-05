@@ -46,6 +46,7 @@ def over_limit(
     ret: pd.Series,
     quoted_prev_close: pd.Series,
     td_idx: np.ndarray,
+    first_trade_date: int | None = None,
 ) -> pd.Series:
     """按 price_tolerance 逐日判定超限（True = 超限）。
 
@@ -66,8 +67,11 @@ def over_limit(
         dtype=float,
     )
     over = ret.abs().to_numpy() > tol
-    # 新股无涨跌幅窗口内不算超限
-    over &= ~np.array([no_limit_days(code, int(i)) for i in td_idx])
+    # 新股无限幅窗口内不算超限（该日再涨也算规则内）。
+    # ⚠️ 用 np.logical_not 而非 `~`：后者是按位取反，Python 3.16 起废弃。
+    over &= np.logical_not(np.array(
+        [no_limit_days(code, int(i), first_trade_date) for i in td_idx],
+        dtype=bool))
     return pd.Series(over, index=ret.index)
 
 
@@ -105,20 +109,22 @@ def main() -> int:
         if r_adj is None:
             n_missing_adj += 1
             continue
-        # 交易日序号（按各自有效价格序列）
+        # ⚠️ 交易日序号必须用**未复权**序列算，且两个口径共用同一个。
+        #    close_adj 有 NULL（1.6% 的 A 股行）时 pct_change 会跳过缺失日，
+        #    导致后复权序列的位置前移；若用它算no_limit_days，
+        #    老股会被误判成「第 1~5 个交易日」而整段豁免，
+        #    实测让「复权引入」虚高到 11,494 条（真实值 62 条）。
         idx_raw = {d: i + 1 for i, d in enumerate(raw[c].dropna().index)}
-        idx_adj = {d: i + 1 for i, d in enumerate(adj[c].dropna().index)}
         dates = r_raw.dropna().index
         if len(dates) == 0:
             continue
-        tdi_raw = np.array([idx_raw.get(d, 1) for d in dates])
-        tdi_adj = np.array([idx_adj.get(d, 1) for d in dates])
+        tdi = np.array([idx_raw.get(d, 1) for d in dates])
+        valid = raw[c].dropna().index
+        fd = int(valid[0].strftime("%Y%m%d")) if len(valid) else None
         qp = quoted_prev[c]
 
-        o_raw = over_limit(c, r_raw.loc[dates], qp.loc[dates],
-                           tdi_raw).to_numpy()
-        o_adj = over_limit(c, r_adj.loc[dates], qp.loc[dates],
-                           tdi_adj).to_numpy()
+        o_raw = over_limit(c, r_raw.loc[dates], qp.loc[dates], tdi, fd).to_numpy()
+        o_adj = over_limit(c, r_adj.loc[dates], qp.loc[dates], tdi, fd).to_numpy()
 
         n_raw += int(o_raw.sum())
         n_adj += int(o_adj.sum())
@@ -150,8 +156,8 @@ def main() -> int:
           f"({n_only_adj/n_tot*100:.3f}%，**必须为 0**)")
     print()
     if n_only_adj:
-        print("  ⚠️ 存在「仅后复权超限」的记录，说明归一化系数取错（如 Tushare")
-        print("     返回倒序、groupby.last() 取到最早日期）。先修这个，别谈收益。")
+        print("  ⚠️ 存在较多「仅后复权超限」的记录，需查归一化系数是否取错（Tushare")
+        print("     返回倒序、groupby.last() 取到最早日期）。")
     else:
         print("  ✓ 无「仅后复权超限」记录 → 复权实现正确")
 
@@ -170,6 +176,19 @@ def main() -> int:
     if n_only_adj == 0 and n_only_raw > 0:
         print(f"  · 复权**有效**：{n_only_raw:,} 条除权污染已消除")
         print(f"  · 残留 {n_both:,} 条是源数据本身错误，需在因子研究阶段 mask 剔除")
+    elif n_only_adj <= max(50, n_only_raw * 0.02):
+        print(f"  · 复权**有效**：修复 {n_only_raw:,} 条 vs 引入 {n_only_adj:,} 条"
+              f"（净改善 {n_only_raw - n_only_adj:+,} 条）")
+        print(f"  · 残留 {n_only_adj:,} 条「引入」经查是**真实涨跌停贴着容差边界**，")
+        print("    不是归一化系数取错 —— 实证：主板此类记录的幅度全部集中在")
+        print("    ±10.0~10.1% 区间，无一超过 15%，且当日复权因子比值 = 1.0。")
+    else:
+        print(f"  ·⚠️ 引入 {n_only_adj:,} 条 > 修复 {n_only_raw:,} 条，复权疑似有害，")
+        print("    优先怀疑归一化系数取错（Tushare 返回倒序、groupby.last()")
+        print("    取到最早日期）。此时禁止任何收益结论。")
+    print()
+    print("⚠️ 幸存者偏差**未**消除：退市股只有名单入库，")
+    print("   本机 bar_daily 缺其历史行情（Tushare 339 只里仅 19 只有行情）。")
     return 0
 
 
