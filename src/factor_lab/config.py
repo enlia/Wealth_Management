@@ -37,6 +37,63 @@ FREE_DATA = WORKSPACE / "data" / "free_data"
 OUTPUT_DIR = WORKSPACE / "runtime"
 INDEX_CONSTITUENT_DIR = FREE_DATA / "指数成分"
 
+
+# ── .env 加载（不引第三方依赖，手写解析）───────────────────────
+# ⚠️ 为什么自己解析而不用 python-dotenv：
+#   为了一个 TUSHARE_TOKEN 加一个依赖不划算，且 python-dotenv 会在 import 时
+#   静默覆盖已存在的环境变量，行为不透明。规则简单到 20 行就能写对。
+#
+# 优先级：真实环境变量 > .env 文件
+#   这样 CI/临时 `TUSHARE_TOKEN=xxx uv run ...` 仍能覆盖 .env 里的值。
+ENV_PATH = WORKSPACE / ".env"
+
+
+def load_env(path: Path | None = None) -> dict[str, str]:
+    """读取 .env，返回键值字典。不修改 os.environ。
+
+    支持的格式（够用即可，不追求完备）：
+      KEY=value
+      KEY = value            # 等号两侧空格会被去掉
+      # 注释行以 # 开头
+      export KEY=value        # 前缀 export 会被剥掉
+      KEY="带引号的值"         # 首尾引号或单引号会被剥掉
+      KEY=                    # 空值视为未设置，跳过
+    """
+    p = path or ENV_PATH
+    if not p.exists():
+        return {}
+
+    out: dict[str, str] = {}
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k and v:                       # 空值跳过，避免覆盖真实环境变量
+            out[k] = v
+    return out
+
+
+_ENV_CACHE = load_env()
+
+
+def env_get(key: str, default: str | None = None) -> str | None:
+    """取配置值：真实环境变量优先，其次 .env。"""
+    return os.environ.get(key) or _ENV_CACHE.get(key) or default
+
+
+def has_token() -> bool:
+    """是否已配置 Tushare token（用于脚本的友好提示，不打印 token 本身）。"""
+    return bool(env_get("TUSHARE_TOKEN"))
+
+
 # 本机通达信（数据源头，用于核对 SQLite 是否正确）
 # ⚠️ 通达信装在哪台机器上不确定，逐个探测常见安装位置。
 #    找不到时审计脚本会明确报「跳过通达信交叉验证」，而不是静默用错数据。
@@ -48,10 +105,12 @@ _TDX_CANDIDATES = (
     r"D:\TONGDAXIN\vipdoc",
     r"C:\tdx\vipdoc",
 )
-TDX_VIPDOC = next(
-    (Path(p) for p in _TDX_CANDIDATES if Path(p).exists()),
-    Path(_TDX_CANDIDATES[0]),          # 都不存在则返回首选，报错信息里会显示它
-)
+# 显式指定优先：.env 里的 TDX_VIPDOC / 环境变量 > 自动探测
+TDX_VIPDOC = Path(env_get("TDX_VIPDOC") or next(
+    (p for p in _TDX_CANDIDATES if Path(p).exists()),
+    _TDX_CANDIDATES[0],          # 都不存在则返回首选，报错信息里会显示它
+))
+
 
 
 # ── 交易成本假设（A股实际水平）────────────────────────────────

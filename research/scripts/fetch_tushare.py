@@ -31,7 +31,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+from factor_lab.config import DB_PATH, env_get, is_a_share  # noqa: E402
 
 ENDPOINT = "http://api.tushare.pro"
 MCP_JSON = Path(os.path.expanduser("~/.workbuddy/mcp.json"))
@@ -42,9 +42,20 @@ EXPECT_DAYS = 2829  # 2015-12 ~ 2026-09 的交易日数，用于完整性校验
 
 # ── token ────────────────────────────────────────────────────
 def get_token() -> str | None:
-    """从 MCP 配置提取 token（不落盘、不打印）。"""
-    if os.environ.get("TUSHARE_TOKEN"):
-        return os.environ["TUSHARE_TOKEN"]
+    """按优先级取 token，全程不落盘、不打印。
+
+    优先级：
+      1. 真实环境变量 TUSHARE_TOKEN
+      2. 项目根 .env 里的 TUSHARE_TOKEN   ← 常规用法
+      3. ~/.workbuddy/mcp.json 的 tushareMcp 配置（自动发现，兜底）
+
+    ⚠️ 2026-10-05 修复：原来只有 1 和 3，用户在 .env 里配的 token
+       永远读不到。现在通过 factor_lab.config.env_get 统一处理。
+    """
+    token = env_get("TUSHARE_TOKEN")
+    if token:
+        return token
+
     if not MCP_JSON.exists():
         return None
     s = MCP_JSON.read_text(encoding="utf-8")
