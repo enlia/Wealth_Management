@@ -55,7 +55,7 @@ def _prep(long: pd.DataFrame) -> pd.DataFrame:
     return d.sort_values(["code", "date"], kind="stable").reset_index(drop=True)
 
 
-# 收益类因子统一用**后复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
+# 收益类因子统一用**前复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
 #
 # ⚠️ 为什么必须复权（AGENTS.md 第二节）
 #   未复权价在除权日出现假跳空：实测主板 0.291% 的日收益超过 ±10% 限制，
@@ -69,7 +69,7 @@ PRICE_COLS = {"close": "close_adj", "high": "high_adj", "low": "low_adj"}
 
 
 def _px(d: pd.DataFrame, field: str = "close") -> pd.Series:
-    """取价格序列，优先用后复权列。
+    """取价格序列，优先用前复权列。
 
     长表由 ``load_long(adjusted=True)`` 产出时才有 ``*_adj`` 列。
     若请求复权列但长表里没有，**直接报错** —— 静默退回未复权价
