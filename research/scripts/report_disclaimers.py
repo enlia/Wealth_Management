@@ -8,7 +8,7 @@
 
 声明里每一句都对应代码里的一个具体位置：
   · 年化收益        → `engine._year_span`（自然日 365.25）几何年化
-  · 年化波动/年成本 → `engine.TRADING_DAYS`（243，A股实测）折算
+  · 年化波动/年成本 → `engine.TRADING_DAYS`（252，PITFALLS P10 公式口径）折算
   · 「夏普」        → 年化收益 ÷ 年化波动（**非标准夏普**）
   · 成本假设        → `factor_lab.analysis.costs.CostModel`
 
@@ -22,8 +22,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-
-from factor_lab.analysis.engine import TRADING_DAYS  # noqa: E402
 
 # 项目 AGENTS.md 第九节「口径声明」的四条 —— 写报告时必须附带（原文照录）。
 AGENTS_CALIBER = (
@@ -46,10 +44,10 @@ def perf_declaration(portfolio: str, cost_desc: str, benchmarks: str) -> str:
     """
     return "\n".join([
         "绩效声明（P14 四要素，缺一不可）：",
-        f"  ① 年化口径：年化收益 = 自然日几何年化（365.25 天/年，"
-        f"engine._year_span，策略与基准同一定义）；"
-        f"年化波动/年成本按日频 × {TRADING_DAYS} 交易日/年折算"
-        "（A股实测，非美股 252）；"
+        "  ① 年化口径：年化收益 = 自然日几何年化（365.25 天/年，"
+        "engine._year_span，策略与基准同一定义）；"
+        "年化按 252 交易日惯例（PITFALLS P10 公式口径）；"
+        "若改 243 属全项目口径变更，需单独立项重刷历史数字可比性，本次不做；"
         "「夏普」= 年化收益 ÷ 年化波动，**非标准夏普**"
         "（标准定义是超额均值/波动）。",
         f"  ② 成本假设：{cost_desc}；换手成本按日从收益中扣减进净值。",
