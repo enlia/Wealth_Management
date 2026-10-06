@@ -42,13 +42,14 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from fetch_tushare import call, get_token, to_ts  # noqa: E402
-from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+from factor_lab.config import DB_PATH, is_a_share, market_of  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "runtime" / "tushare"
@@ -60,18 +61,22 @@ RATE_LIMIT_S = 0.34          # 180 次/分钟 ≈ 0.33 s/次，留余量
 
 
 def to_code(symbol: str) -> str | None:
-    """6 位代码 → 本机代码（交易所由代码段唯一决定）。
+    """6 位代码 → 本机代码。
 
     ⚠️不要用 ``ts_code.str.slice(0,2)`` 取前缀 —— Tushare 的 ts_code
     形如 ``000003.S``，交易所写在**后缀**，slice(0,2) 得到 "00"，
     全表对不上，「重合 0 只」的结论完全是假的（2026-10-06 实测踩过）。
+
+    ⚠️ **交易所判定必须复用 ``factor_lab.config.market_of``，不能自己重写一套**
+       （2026-10-06 review 抓出）。本函数原先内联了
+       ``s[0] in "0366" →sh``，于是 ``300526``（创业板）被判成 ``sh300526``、
+       ``920680``（北交所）被判成 ``sz920680`` —— 两条都错，且都**不报错**，
+       只是让股票被 ``is_a_share`` 静默剔除，敞口统计跟着偏。
+       同一套代码段规则写两遍，迟早会分叉（PITFALLS 同类问题的第三个实例）。
     """
     s = str(symbol).zfill(6)
-    if s[0] in "0366":
-        return f"sh{s}"
-    if s[0] in "348":
-        return f"bj{s}"
-    return f"sz{s}"
+    m = market_of(s)
+    return f"{m}{s}" if m else None
 
 
 def find_missing(start_after: str = "20160101") -> pd.DataFrame:
@@ -149,13 +154,6 @@ def main() -> int:
         return 0
 
     # ── 正式拉取 ────────────────────────────────────────────────
-    if args.merge_only:
-        if not PARQ.exists() or not PARQ_ADJ.exists():
-            raise SystemExit(f"✗ 找不到 {PARQ.name} / {PARQ_ADJ.name}，"
-                             "请先跑一次不带 --merge-only 的下载")
-        print("→ --merge-only：复用已下载的 parquet，不重新请求 Tushare")
-        return merge_into_db(pd.read_parquet(PARQ), pd.read_parquet(PARQ_ADJ))
-
     token = get_token()
     if not token:
         raise SystemExit("✗ 取不到 Tushare token")
@@ -247,21 +245,32 @@ def merge_into_db(df: pd.DataFrame, adj: pd.DataFrame) -> int:
         src = df.copy()
         src["date"] = src["trade_date"].astype(int)
 
-    # ── close_adj：按并库脚本同口径回填 ──────────────────────────
-    # ⚠️ 过滤基准是「parquet 里的全部代码」而不是 `new`：
-    #    --merge-only 场景下 new 为空（日线已在库），用 new 过滤会得到
-    #    空 adj，命中率算成 NaN，然后报「19,623 行匹配不到」——
-    #    错误信息指向了错的行，排查方向被带偏（实测踩过）。
+    # ── close_adj：与 merge_tushare_into_db.py **同口径** ─────────────
+    #⚠️ 2026-10-06 review 抓出：归一化分母必须**先剔除本机无行情的日期**
+    #    再取 last()。Tushare 的 adj_factor 会延伸到**最后交易日之后**
+    #    （退市股实测多出 19~802 天），不过滤就会取到「退市后」的填充因子。
+    #    实测偏差：bj920680 分母 0.7914 vs 1.0122（**差 22%**），
+    #    bj833874 差 2.5%，bj832317/bj833994 差 0.005%。
+    #    → close_adj 末日不再等于 close，两套口径混用直接毁掉复权。
+    have = set(zip(src["code"], src["date"].astype(int)))
     a = adj[adj["code"].isin(set(df["code"]))].copy()
     a["dnum"] = a["trade_date"].astype(int)
+    a = a[np.array([(c, d) in have for c, d in zip(a["code"], a["dnum"],)],
+                   dtype=bool)]
+    if a.empty:
+        con.close()
+        raise SystemExit("✗ 剔除无行情日期后 adj_factor 为空，键完全对不上")
     # ⚠️ Tushare adj_factor 是**日期倒序**，必须先排序再取 last()。
-    #    早先并库脚本取 iloc[-1] 拿到最早日期，归一化系数错 1.26 倍。
     latest = a.sort_values(["code", "dnum"]).groupby("code")["adj_factor"].last()
     a["norm"] = a["code"].map(latest)
-    hit = a["adj_factor"] / a["norm"]
-    have_dates = set(zip(src["code"], src["date"].astype(int)))
-    rate = float((a["dnum"].isin({d for _, d in have_dates})).mean())
-    print(f"复权因子命中率 {rate:.1%}（低于 90% 说明键错配，应报错）")
+
+    # 命中率必须按 **(code, date) 复合键**算。
+    # 🔴 2026-10-06 review 抓出：原先只比 dnum，把 code 丢掉了 ——
+    #    把所有 code 改成库里不存在的值，命中率仍报 99.6% 并通过阈值，
+    #    是一个「永远不会报警」的判据（DATA_QUALITY Q11）。
+    pairs = set(zip(a["code"], a["dnum"]))
+    rate = len(pairs & have) / max(len(pairs), 1)
+    print(f"复权因子命中率 {rate:.1%}（按 code+date 复合键，低于 90% 即中止）")
     if not rate >= 0.90:
         con.close()
         raise SystemExit(f"✗ 复权因子命中率仅 {rate:.1%}，键错配，已中止")
@@ -277,15 +286,14 @@ def merge_into_db(df: pd.DataFrame, adj: pd.DataFrame) -> int:
         raise SystemExit(
             f"✗ {int(m['adj_factor'].isna().sum())} 行匹配不到复权因子，已中止")
     m["close_adj"] = m["close"].astype(float) * m["adj_factor"] / m["norm"]
-    # 🔴 **逐条 execute，不用 executemany**（实测 2026-10-06，SQLite 3.53.1）：
-    #    同样的 19,623 条参数、同一张表、同一个连接：
-    #      · executemany → 写入 0 行，**不报错**，同连接内也查不到
-    #      · 逐条 execute → 命中 19,623/19,623
-    #    逐条慢（十几秒）但结果可验证。对19k 行的回填完全可接受，
-    #    拿「快」换「静默写不进去」不值。
-    #    另：参数用普通 tuple 并显式转 int/float，不接受 numpy 标量。
+    # 先物化成 list：itertuples() 是**一次性迭代器**，若被任何前置操作
+    # （len/list/打印/zip）碰过，后面 executemany 会静默写入 0 行、
+    # rowcount 返回 -1 且不报错（ENGINEERING 第四节实测）。
     upd = [(str(r.code), int(r.dnum), float(r.close_adj))
            for r in m.itertuples(index=False)]
+    # 逐条 execute 而非 executemany：为的是拿到**每条的 rowcount**，
+    # 从而统计出「有多少行没命中」。executemany 只给总数，
+    # 中间哪一条对不上无从得知 —— 这正是 P18「静默失败」的形态。
     miss = 0
     for c, dt, ca in upd:
         if cur.execute(
