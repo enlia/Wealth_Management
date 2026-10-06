@@ -80,6 +80,44 @@ def run_precheck(skip: bool) -> None:
     print("   ✓ 数据审计通过")
 
 
+def build_run_meta(
+    ver: dict,
+    *,
+    factors: str,
+    pool: str,
+    interval: str,
+    codes: list[str],
+    in_pool: list[str],
+) -> dict:
+    """组装 run_meta.json 的内容。
+
+    ⚠️ 样本清单必须**逐只代码**落盘（P23 教训：曾声称写了清单、实际没写）：
+       ``all_codes()`` 随数据库更新漂移，只记 seed + 只数无法复现当年抽到的
+       样本 —— 不落清单则历史读数（如某次 42 只×177 日的冒烟数值）
+       事后无法对样本复核。两个清单各司其职：
+         样本清单 = 抽样中签（或全市场枚举）的 code，可复现"当初抽了谁"；
+         入池清单 = 股票池过滤后真正进入检验的 code，可复现"当初算了谁"。
+    """
+    return {
+        "数据版本": ver["version"],
+        "打戳时间": ver["stamped_at"],
+        "因子": factors,
+        "股票池": pool,
+        "区间": interval,
+        "样本清单": sorted(codes),
+        "样本数": len(codes),
+        "入池清单": sorted(in_pool),
+        "入池数": len(in_pool),
+    }
+
+
+def write_run_meta(out_dir: Path, meta: dict) -> Path:
+    """写 ``out_dir/run_meta.json``（UTF-8、保留中文键名），返回文件路径。"""
+    p = Path(out_dir) / "run_meta.json"
+    p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
 def main() -> int:
     args = parse_args()
     cfg = DEFAULT_RESEARCH
@@ -231,15 +269,15 @@ def main() -> int:
     try:
         from data_version import build_manifest
         ver = build_manifest()
-        meta = {
-            "数据版本": ver["version"],
-            "打戳时间": ver["stamped_at"],
-            "因子": args.factors,
-            "股票池": "全市场" if args.all else f"随机 {args.n} 只 (seed={args.seed})",
-            "区间": f"{args.start or '默认'} ~ {args.end or '默认'}",
-        }
-        (out_dir / "run_meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta = build_run_meta(
+            ver,
+            factors=args.factors,
+            pool="全市场" if args.all else f"随机 {args.n} 只 (seed={args.seed})",
+            interval=f"{args.start or '默认'} ~ {args.end or '默认'}",
+            codes=codes,
+            in_pool=alive,
+        )
+        write_run_meta(out_dir, meta)
         print(f"\n数据版本: {ver['version']}  （已写入 run_meta.json）")
         print(f"  Tushare {ver['totals']['ts_rows']:,} 行 / "
               f"本机库 {ver['totals']['db_rows']:,} 行")
