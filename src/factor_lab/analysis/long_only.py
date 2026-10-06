@@ -49,6 +49,7 @@ from factor_lab.analysis.spec import (
     PortfolioSpec,
     _normalize_bounded,
 )
+from factor_lab.config import SCALING_TRADING_DAYS
 
 # ⚠️ **re-export**：`PortfolioSpec` / `_normalize_bounded` 已搬到 `spec.py`，
 #   但外部调用方（含既有测试）从 `long_only` 导入它们。
@@ -131,7 +132,7 @@ def build_long_only(
     #   实测 5,606 只 × 2,611 日跑到 20 分钟没跑完（O(n²)）。
     #   pandas 的 rolling 是 O(n)，预计算后逐日只做 O(n_hold) 的索引。
     rolling_vol = (past.rolling(spec.vol_lookback, min_periods=max(
-        20, spec.vol_lookback // 3)).std() * np.sqrt(252))
+        20, spec.vol_lookback // 3)).std() * np.sqrt(SCALING_TRADING_DAYS))
 
     #⚠️ 性能：整段**向量化**。
     #   初版是逐日 for 循环 + 每日全表切片，

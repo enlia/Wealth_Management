@@ -10,9 +10,13 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 sys.path.insert(0, ".")
 from tdx import read_day, all_codes
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from factor_lab.config import SCALING_TRADING_DAYS
 
 RAW = "raw/all_raw.txt"
 OUT = "universe.csv"
@@ -139,7 +143,8 @@ def load_tech(sample=None):
             "历史最高": round(hi, 3), "历史最低": round(lo, 3),
             "距最高%": round((cl.iloc[-1] / hi - 1) * 100, 2),
             "距最低%": round((cl.iloc[-1] / lo - 1) * 100, 2),
-            "年化波动率%": round(r.iloc[-244:].std() * np.sqrt(244) * 100, 2)
+            # iloc[-244:] 是回看窗口长度（非年化常数，勿随 244→252 混用牵连）
+            "年化波动率%": round(r.iloc[-244:].std() * np.sqrt(SCALING_TRADING_DAYS) * 100, 2)
                             if len(r) >= 60 else np.nan,
             **{f"MA{n}": round(v, 3) for n, v in ma.items()},
         })

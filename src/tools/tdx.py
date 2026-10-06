@@ -31,9 +31,13 @@ import sys
 import glob
 import struct
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from factor_lab.config import SCALING_TRADING_DAYS
 
 # ── 路径配置（按你本机实际位置）──────────────────────────────
 TDX = r"C:\SoftWare\TONGDAXIN\Body\vipdoc"
@@ -198,7 +202,7 @@ def indicators(d):
     # 波动率（年化，%）
     if len(c) >= 61:
         r = np.log(c / c.shift(1)).dropna()
-        out["年化波动率%"] = r.iloc[-60:].std() * np.sqrt(244) * 100
+        out["年化波动率%"] = r.iloc[-60:].std() * np.sqrt(SCALING_TRADING_DAYS) * 100
     return out
 
 
