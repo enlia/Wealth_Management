@@ -52,6 +52,16 @@ class TestPerfDeclaration:
         assert "需单独立项重刷历史数字可比性" in text
         assert "非标准夏普" in text
 
+    def test_时长换算必须限定适用范围(self):
+        """243 只是兜底口径 —— 不限定会被读成「所有年数都按 243」：
+        有日期的年跨越走自然日 365.25（engine._year_span 主路径，
+        与基准侧同一定义），该限定必须钉在声明里防漂移。"""
+        text = perf_declaration(portfolio="p", cost_desc="c", benchmarks="b")
+        assert ("仅用于无日期索引的兜底折算" in text
+                and "有日期的年跨越按自然日 365.25" in text), (
+            "声明缺时长换算（243）的适用范围限定 —— 它只兜底无日期索引的"
+            "年数折算，有日期的年跨越按自然日 365.25")
+
 
 class TestAgentsCaliber:
     def test_口径声明必含AGENTS第九节四条(self):
