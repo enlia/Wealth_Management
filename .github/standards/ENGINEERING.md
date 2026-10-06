@@ -45,6 +45,7 @@
       分支的每个提交都留在 main 历史中，可回溯全过程。
    ⚠️ 本机 gh.exe 在 C:/Program Files/GitHub CLI/，可能不在 PATH：
       "C:/Program Files/GitHub CLI/gh.exe" pr merge 1 --merge
+   ⚠️ 也可网页点 Merge 按钮合并：**禁选 Squash and merge**。
 7. 保留分支              ⚠️ 合并后不删除，保留作历史记录
 ```
 
@@ -85,6 +86,8 @@ GitHub **不对分支数量设强制上限**，但官方文档在Repository limi
 
 因此**保留已合并分支不会触及任何限制**，反而有可追溯价值。
 若日后分支数逼近数百，可批量归档。
+
+⚠️ 任何清理操作前先确认分支已合并、内容已进入 main。
 
 ⚠️ **判据必须是内容比对，不能用 `git branch --merged`**：
 

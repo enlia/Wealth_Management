@@ -58,7 +58,33 @@ BUSINESS_KEYS: dict[str, list[str]] = {
     "top10_floatholders": ["ts_code", "end_date", "holder_name", "ann_date"],
     "stk_holdernumber":  ["ts_code", "end_date", "ann_date"],
     "pledge_stat":       ["ts_code", "end_date"],
-    "share_float":       ["ts_code", "float_date", "ann_date"],
+    # ⚠️ dividend 主键必须含 **div_proc**（2026-10-06 实测踩过）：
+    #   分红是**多阶段流程**，同一报告期会有多条记录：
+    #   预案 → 股东大会通过 → 实施，各阶段ann_date 不同。
+    #   实测 9 种阶段：股东大会通过 118,458 / 预案 77,983 /
+    #   实施 57,381 / 预披露 1,176 / 股东提议 210 ...
+    #   原主键 [ts_code, end_date] 把它们全判成重复 ——
+    #   实测 255,573 行里186,890 行涉及重复（73%），全是误报。
+    #
+    #   ⚠️ 但**光加 div_proc 还不够**：实测 000001.SZ 20080630 有两条
+    #   都是「实施」、div_proc 相同，只有 ann_date 不同
+    #   （20080926 与 20081016）⇒ 那是**修正公告**，
+    #   修正幅度本身是信息（业绩超预期因子里要用），不能去重。
+    "dividend":          ["ts_code", "end_date", "div_proc", "ann_date"],
+    # ⚠️ share_float 主键必须含 **holder_name**（2026-10-06 实测）：
+    #   同一 (ts_code, ann_date, float_date) 会有**多个股东**的解禁记录 ——
+    #   实测 000878.SZ 20260311/20310317 有两条：
+    #     中国铝业集团有限公司 → 公开增发一般股份
+    #     中国铜业有限公司     → 定增股份
+    #   它们是**两条合法记录**（不同股东的限售股），
+    #   原键 [ts_code, float_date, ann_date] 把 4,251 行里的 3,257 行判成重复。
+    #   实测加 holder_name 后重复归 0。
+    #
+    #   ⚠️ 另注：`float_date` 是**计划解禁日期**，实测含未来日期
+    #   （最远 20330711）⇒ **不可用于判时间覆盖**，
+    #   门禁的 DATE_COL必须用 ann_date。
+    "share_float":       ["ts_code", "float_date", "ann_date",
+                          "holder_name"],
     # 指数权重：必须带 index_code，否则同日的沪深300/中证500 会被合并
     "index_weight":      ["index_code", "con_code", "trade_date"],
     "report_rc":         ["ts_code", "ann_date", "end_date", "org_name"],

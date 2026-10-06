@@ -8,19 +8,22 @@
   P10 钉死公式 `gross = spread * (252 / periods[0])`；
 - **② 时长换算兜底**（无日期索引输入：交易日数 ÷ 年均交易日）= **243**：
   A 股实测算式 2,611 交易日 ÷ 10.75 历年 = 242.9 ≈ 243（年均交易日）；
-- **③ 有日期的年跨越** = 自然日 365.25（analysis.long_only._year_span 主路径）。
+- **③ 有日期的年跨越** = 自然日 365.25（analysis.engine._year_span 主路径）。
 
 常数唯一出处 `src/factor_lab/config.py`：`SCALING_TRADING_DAYS`（①）、
-`YEAR_TRADING_DAYS`（②）。本文件钉三件事：
+`YEAR_TRADING_DAYS`（②）；`analysis.engine` 只引用导出（同一对象）。
+本文件钉四件事：
 
-1. 双常数各自钉死（含「244/252 串用必须失败」反向断言）；
+1. 双常数各自钉死（含「244/252 串用必须失败」反向断言）与引擎 re-export 同一性；
 2. σ 年化乘数钉 √252（含按 √244／√243 折算必须失败的反向断言）；
 3. 全仓 σ 年化位置源码守护：还原 √244 历史形态、或把 252/243/244 写成
-   sqrt 字面值（绕开常数）必须 FAILED。
+   sqrt 字面值（绕开常数）必须 FAILED；
+4. 引擎路径的倍数/时长换算真值（simulate_matrix / _year_span 语义并集，
+   算式可复核，含互换必须失败的反向断言）。
 
 ## 判据
 
-按 UNITS「找已知真值反推」：已知日收益样本的标准差算式写在用例注释里，
+按 UNITS「找已知真值反推」：已知样本的 std/年数算式写在用例注释里，
 期望年化 = std × √252（可复算）；历史形态 ×√244 与口径比值
 √(252/244) ≈ 1.0163（修正前后原始波动率数值差 ±1.63%），换回 √244 必须变红。
 """
@@ -38,6 +41,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from factor_lab.analysis.costs import CostModel  # noqa: E402
+from factor_lab.analysis.engine import _year_span, simulate_matrix  # noqa: E402
+from factor_lab.analysis.spec import PortfolioSpec  # noqa: E402
 from factor_lab.config import (  # noqa: E402
     SCALING_TRADING_DAYS,
     YEAR_TRADING_DAYS,
@@ -55,7 +61,8 @@ SIGMA_FILES = (
     "src/tools/build_universe.py",              # load_tech()「年化波动率%」
 )
 BARE_SIGMA_FILES = (
-    "src/factor_lab/analysis/long_only.py",     # rolling_vol / _bench_stats 年化波动
+    "src/factor_lab/analysis/long_only.py",     # build_long_only() 滚动波动率
+    "src/factor_lab/analysis/engine.py",        # simulate_matrix() 年化波动/年成本
 )
 
 _CLOSES = [100.0, 99.0, 97.0, 98.0]
@@ -66,6 +73,8 @@ _LONG = pd.DataFrame({
     "close": _CLOSES,
     "close_adj": _CLOSES,   # 因子口径按后复权价（_px 强制要求该列）
 })
+
+DATES = pd.date_range("2023-01-02", periods=3, freq="B")
 
 
 class Test换算常数各自钉死:
@@ -92,6 +101,85 @@ class Test换算常数各自钉死:
             "时长层常数被改成 252 —— 252 是 ① 倍数层口径，② 时长层是 243")
         assert SCALING_TRADING_DAYS != YEAR_TRADING_DAYS, (
             "两层常数被并成一个值 —— 倍数 252 与时长 243 语义不同，勿一刀切")
+
+    def test_engine常数为config同一引用_收口唯一出处(self):
+        """engine 的双常数必须是 config 的同一对象（引用导出，不另定义副本）；
+        唯一定义源 = src/factor_lab/config.py。"""
+        from factor_lab.analysis import engine
+        assert engine.SCALING_TRADING_DAYS is SCALING_TRADING_DAYS, (
+            "engine.SCALING_TRADING_DAYS 不是 config 同一对象 —— "
+            "定义副本会重新制造双源漂移")
+        assert engine.YEAR_TRADING_DAYS is YEAR_TRADING_DAYS, (
+            "engine.YEAR_TRADING_DAYS 不是 config 同一对象")
+
+
+class Test倍数换算252:
+    def test_年化波动倍数放大按252(self):
+        """日收益 [0.01, 0, 0] 的已知真值（算式可复核）：
+
+        均值        = 0.01/3                             ≈ 0.0033333
+        Σ(x−mean)²  = 0.0066667² + 2×0.0033333²          = 6.66667e-5
+        std(ddof=1) = √(6.66667e-5 / 2)                  ≈ 0.0057735
+        年化波动     = std × √252 ≈ 0.0057735 × 15.87451  ≈ 0.091652
+        （√252 是倍数放大，不是时长折算 —— 时长口径才是 243）
+        """
+        fwd = pd.DataFrame({"sh600000": [0.01, 0.0, 0.0]}, index=DATES)
+        res = simulate_matrix(
+            DATES, np.array([[0], [0], [0]]), np.array([[1.0], [1.0], [1.0]]),
+            fwd, CostModel(), PortfolioSpec(name="t", n_hold=1))
+        assert res["ok"], res.get("reason")
+        daily_std = float(np.std([0.01, 0.0, 0.0], ddof=1))
+        assert res["年化波动"] == pytest.approx(
+            daily_std * math.sqrt(252), rel=1e-9)
+        assert res["年化波动"] != pytest.approx(
+            daily_std * math.sqrt(243), rel=1e-3), (
+            "倍数放大被按 243 折算 —— 倍数口径是 252（PITFALLS P10 公式），"
+            "243 是时长口径，两种语义不能混")
+
+    def test_平均年成本倍数放大按252(self):
+        """一次调仓换手 L1=2 的已知真值（算式可复核）：
+
+        CostModel 默认：commission=0.00025、transfer_fee=0.00001、
+          slippage=0.001 ⇒ buy = 0.00126；stamp_duty=0.0005 ⇒ sell = 0.00176
+        单边均值 (buy+sell)/2         = 0.00151
+        持仓列 0→1（卖 1 买 1）L1 = 2 ⇒ 日成本 = 2×0.00151 = 0.00302
+        3 行均值 = 0.00302/3           ≈ 0.00100667
+        平均年成本 = 0.00100667 × 252  ≈ 0.255680
+        （×252 是倍数放大，不是时长折算）
+        """
+        fwd = pd.DataFrame({"sh600000": [0.0, 0.0, 0.0],
+                            "sz000001": [0.0, 0.0, 0.0]}, index=DATES)
+        res = simulate_matrix(
+            DATES, np.array([[0], [1], [1]]), np.array([[1.0], [1.0], [1.0]]),
+            fwd, CostModel(), PortfolioSpec(name="t", n_hold=1))
+        assert res["ok"], res.get("reason")
+        cost = CostModel()
+        per_day = [0.0, 2.0 * (cost.buy + cost.sell) / 2, 0.0]
+        assert res["平均年成本"] == pytest.approx(
+            sum(per_day) / 3 * 252, rel=1e-9)
+        assert res["平均年成本"] != pytest.approx(
+            sum(per_day) / 3 * 243, rel=1e-3), (
+            "倍数放大被按 243 折算 —— 倍数口径是 252（PITFALLS P10 公式），"
+            "243 是时长口径，两种语义不能混")
+
+
+class Test时长换算243:
+    def test_年数时长按年均243交易日折算(self):
+        """交易日数 → 年数的已知真值（算式可复核）：
+
+        243 个位置索引  = 243/243  = 1.000 年
+        2611 个位置索引 = 2611/243 ≈ 10.745 年
+          （A股实测：2,611 交易日 ≈ 10.75 历年，2611÷10.75 = 242.9 ≈ 243，
+            即常量的出处算式）
+        """
+        assert _year_span(list(range(243))) == pytest.approx(243 / 243,
+                                                             rel=1e-9)
+        assert _year_span(list(range(2611))) == pytest.approx(2611 / 243,
+                                                              rel=1e-9)
+        assert _year_span(list(range(243))) != pytest.approx(243 / 252,
+                                                             rel=1e-3), (
+            "时长折算被按 252 计 —— 时长口径是 243（A股年均交易日），"
+            "252 是倍数口径，两种语义不能混")
 
 
 class Testσ年化乘数钉死252:
