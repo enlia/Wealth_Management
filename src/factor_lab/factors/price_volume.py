@@ -195,6 +195,10 @@ def hh_hl_score(long: pd.DataFrame, window: int = 20) -> pd.Series:
        用未复权价会把「除权」误读成「高点降低」，趋势结构直接判错。
     """
     d = _prep(long)
+    # ⚠️ 这里原本有一行 `g = d.groupby("code", sort=False)`（`bd64b99` 遗留）：
+    #   建了索引却从未查询 —— 下面 `hi`/`lo` 都是各自 inline 建 groupby，
+    #   `g` 是死变量，CI 的 F841 检查（拦的是**整仓**）会拦住它。
+    #   该行已删；保留这段说明，以免同样的写法再回来。
     hi = _px(d, "high").groupby(d["code"], sort=False).rolling(window).max() \
         .reset_index(level=0, drop=True)
     lo = _px(d, "low").groupby(d["code"], sort=False).rolling(window).min() \
