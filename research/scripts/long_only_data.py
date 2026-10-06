@@ -38,10 +38,17 @@ def _shift_date(d: str, n_days: int) -> str:
 
        这类缺陷不报错、不影响其他因子，只让长窗口因子**样本变少**，
        很难被发现 —— 必须靠「跨年时检查长窗口因子的非空率」来发现。
+    ⚠️ **BDay 的日历口径 ≠ 真实交易日历**（market.db 只读统计实测）：
+       `BDay(260)` 回推覆盖到的真实交易日只有 **242~243 个**
+       （2018 / 2020 / 2022 / 2023 各年段实测均 242~243），
+       比 pos250 需要的 250 个交易日**短约 8 个交易日** ——
+       即每年年初长窗口因子的最前几行仍可能为 NaN。
+       这不是「多取几天」的保守写法，而是略少取：
+       BDay 只排除周末、不排除法定节假日。
+       预热下限按节假日口径收紧不属于本函数职责（约束本体在
+       WARMUP_TRADING_DAYS 与因子窗口长度的比对），这里如实记下边界。
     """
     ts = pd.Timestamp(d)
-    # BDay 只排除周末，不排除法定节假日 —— 偏保守（多取几天数据），
-    # 比少取安全。少取会丢样本，多取只是多读一点。
     return (ts - pd.tseries.offsets.BDay(abs(n_days))).strftime("%Y%m%d")
 
 
@@ -89,12 +96,28 @@ def load_long_chunked(codes: list[str], start: str, end: str,
 
     做法：按年切片逐年加载，峰值内存降到 1/10。
     因子计算只要 close_adj（有 OHLC 的因子才追加）。
+
+    ⚠️ **年份切片的下界是 max(该年元旦, start)，切片之间不允许重叠**：
+       下界统一用 start 时，后面每个切片都从 start 重读到本年末 ——
+       同一段数据被读 N 次（2019 段已包含的 2018 预热行，2018 切片也读），
+       行数重复靠下游去重兜底，IO 近似随切片数平方放大，
+       与「分块控内存」的本意相悖。
+       预热数据不会因 max() 丢掉：start 所在年的切片 lo = start，
+       各切片并集仍是 [start, hi]；前提是 years 必须覆盖 start 所在年份
+       —— 下方有显式校验，缺失直接抛错，不做静默漏读。
     """
     from factor_lab.config import DB_PATH
 
     if years is None:
         y0, y1 = int(start[:4]), int(end[:4])
         years = tuple(range(y0, y1 + 1))
+    if min(years) > int(start[:4]):
+        raise ValueError(
+            f"years={years} 未覆盖 start={start} 所在年份 —— "
+            f"[start, 起始年元旦] 的预热/起始数据会被**整段漏读**。\n"
+            f"  years 至少要从 {int(start[:4])} 起"
+            f"（build_panel 传 range(pad_year, y+1)，pad_year = pad_start "
+            f"实际所在年份）。")
 
     chunks: list[pd.DataFrame] = []
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -103,18 +126,11 @@ def load_long_chunked(codes: list[str], start: str, end: str,
         ys, ye = f"{y}0101", f"{y}1231"
         if ye < start[:8] or ys > end[:8]:
             continue
-        # ⚠️ **不能用 max(ys, start) 做下界**（实测踩过）：
-        #   `start` 可能是**预热起点**（如 20180102），
-        #   而 `ys` 是本年 1 月 1 日。max() 会把下界夹回本年元旦，
-        #   于是**预热数据一行都读不到**，
-        #   长窗口因子（pos250 / mom120）在年初必然全 NaN。
-        #
-        #   实测：`start=20180102, years=(2018, 2019)`
-        #        → 2019 段 lo = max('20190101','20180102') = '20190101'
-        #        → 预热完全失效（修复 WARMUP 天数后暴露出来）。
-        #
-        #   正确做法：下界直接用 start（它已是更早的预热起点）。
-        lo = start[:8]
+        # ⚠️ **下界 = max(该年元旦, start)** —— 见函数 docstring：
+        #   统一用 start 会让相邻切片重读同一段数据（行数重复 + IO 放大）；
+        #   用 max() 后切片互不重叠，并集不变，
+        #   但 years 必须覆盖 start 所在年份（上方校验已挡）。
+        lo = max(ys, start[:8])
         hi = min(ye, end[:8])
         parts = []
         # 分批取代码，避免单条 SQL 的 IN 列表过长

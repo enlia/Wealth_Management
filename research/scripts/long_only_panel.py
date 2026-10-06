@@ -126,10 +126,13 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         #   正确做法：每一年都往前预热 WARMUP_TRADING_DAYS 个交易日。
         pad_start = _shift_date(ys, -WARMUP_TRADING_DAYS)
         # ⚠️ **years 必须按 pad_start 实际落到的年份算**，不能写死 (y-1, y)。
-        #   260 个交易日可能跨到 y−2（如 2024-01-01 → 2023-01-02，刚好 y−1；
-        #   但 2021-01-01 → 2019-12 附近就会跨到 y−2）。
-        #   写死 (y-1, y) 会让跨到 y−2 的那部分预热数据读不到，
-        #   而 `load_long_chunked` 内部按整年边界切片，漏掉的年份整段跳过。
+        #   `_shift_date` 用 BDay 回推、遇周末还要再退一截：
+        #   实测对 2019~2024 各年 1 月 1 日回推 260 BDay，
+        #   落点依次是 20180102 / 20190102 / 20200103 / 20210104 /
+        #   20220103 / 20230102 —— 都在 y−1，但这只是 BDay 周末回退的
+        #   算术结果，不是契约；一旦落点前移到 y−2（预热加大、
+        #   或日历口径变化），写死 (y-1, y) 会把 y−2 的预热数据整段漏读，
+        #   而 `load_long_chunked` 按整年边界切片，漏掉的年份整段跳过。
         pad_year = int(pad_start[:4])
         long = load_long_chunked(codes, pad_start, ye,
                                  years=tuple(range(pad_year, y + 1)),
