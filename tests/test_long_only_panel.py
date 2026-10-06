@@ -72,11 +72,26 @@ class TestBuildPanelAlignment:
         with pytest.raises(ValueError, match="因子面板 b"):
             build_panel([CODE], ["a", "b"], "20190101", "20191231")
 
-    def test_无因子面板必须报错(self, monkeypatch):
-        """还原 bug 版拿 price 与自身比对后照样打印「对齐通过」。"""
+    def test_无因子面板必须报错(self, monkeypatch, capsys):
+        """还原 bug 版拿 price 与自身比对后照样打印「对齐通过」。
+        跳过还必须打印「跳过 X + 原因 Y」（ENGINEERING §四 / DATA_SOURCE S2：
+        0 行不是「正常为空」）。"""
         _patch(monkeypatch, {"a": None})
         with pytest.raises(ValueError, match="没有任何因子面板"):
             build_panel([CODE], ["a"], "20190101", "20191231")
+        out = capsys.readouterr().out
+        assert "跳过因子 a" in out and "原因" in out, (
+            f"静默跳过不允许，必须打印因子名与原因：{out!r}")
+
+    def test_零行片段必须打印跳过与原因(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            long_only_panel, "load_long_chunked",
+            lambda codes, start, end, years=None, verbose=True: pd.DataFrame())
+        with pytest.raises(ValueError):
+            build_panel([CODE], ["a"], "20190101", "20191231")
+        out = capsys.readouterr().out
+        assert "跳过整年" in out and "0 行" in out, (
+            f"取数 0 行必须打印年份与原因：{out!r}")
 
     def test_索引一致时返回去重后的价格面板(self, monkeypatch):
         _patch(monkeypatch, {"a": DATES})

@@ -138,6 +138,8 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
                                  years=tuple(range(pad_year, y + 1)),
                                  verbose=False)
         if long.empty:
+            print(f"    {y}: 跳过整年，原因：{pad_start}~{ye} 取数 0 行"
+                  f"（{len(codes):,} 只代码均无 close_adj 非空行情）")
             continue
         # ⚠️⚠️ **预热数据必须先按 (code, date) 去重**（实测踩过）：
         #   相邻年份切片的预热区间会重叠，同一 (code, date) 出现多行，
@@ -171,6 +173,8 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         for f in factors:
             s = compute_factor(f, long)
             if s is None or s.empty:
+                print(f"    {y}: 跳过因子 {f}，原因：compute_factor 返回空"
+                      f"（输入 {len(long):,} 行）")
                 continue
             # compute_factor 返回 MultiIndex(date, asset) —— 层名是 asset
             wide_f = s.unstack("asset").sort_index()
@@ -178,6 +182,8 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
             # 裁剪必须在因子计算之后，否则预热数据白读（见上方注释）。
             wide_f = wide_f[(wide_f.index >= lo) & (wide_f.index <= hi)]
             if wide_f.empty:
+                print(f"    {y}: 跳过因子 {f}，原因：裁剪到 [{ys}, {ye}] 后 0 行"
+                      f"（裁剪前 {len(s.index)} 个 (日期, 代码) 行）")
                 continue
             acc[f].append(wide_f)
         # 价格面板**必须用同一区间裁剪**（实测踩过）：
@@ -193,6 +199,8 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         px_wide = px_wide[(px_wide.index >= lo) & (px_wide.index <= hi)]
         if not px_wide.empty:
             price_parts.append(px_wide)
+        else:
+            print(f"    {y}: 跳过价格面板，原因：裁剪到 [{ys}, {ye}] 后 0 行")
         # ⚠️ **不能用 len(DataFrame)** 算「格数」——
         #   len(df) 返回的是**列数**，单因子面板永远打印「1 格」。
         #   实测踩过：面板实际有 2,600 日期 × 5,600 只 = 1,460 万格，
