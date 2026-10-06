@@ -12,12 +12,14 @@ import numpy as np
 import pandas as pd
 
 from ..config import ResearchConfig, is_a_share
+from .sqlite_source import load_first_dates
 
 
 def build_universe(
     long: pd.DataFrame,
     cfg: ResearchConfig,
     info: pd.DataFrame | None = None,
+    first_dates: pd.Series | None = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """构建可交易股票池，返回过滤后的长表。
@@ -28,6 +30,13 @@ def build_universe(
       3. 上市满 250 个交易日（规避次新股的异常收益模式）
       4. 20 日均成交额 ≥ 5000 万（流动性陷阱：无法在涨停时买入）
       5. 剔除 ST（从名称判断）
+
+    ⚠️ 「上市满 N 个交易日」的边界口径（钉死，勿改回）：
+       · 计龄基准 = ``stock_info.list_date``；该股缺 list_date 时按**表内首日**
+        （详见 ``_listing_base``，逐级打印受影响计数）。
+       · 上市当天计龄 0；计龄 ≥ cfg.min_list_days 当天即合格
+        （=「上市当天算第 1 日」口径下的第 N+1 个交易日）。
+       · 计龄基准早于窗口起点 → 窗口内每一天都已判满，直接合格。
     """
     n0 = len(long)
     d = long[long["code"].map(is_a_share)].copy()
@@ -48,55 +57,11 @@ def build_universe(
         # **每一只股票都会被淘汰** —— 股票池直接变成 0 只。
         # 表现为「close_adj 面板为空」，报错信息却指向并库，
         # 把排查方向带偏（第一次就这么被带偏过）。
-        #
-        # 正确口径：以 ``stock_info.list_date``（真实上市日）为基准。
-        # 退化路径：info 缺失或该股没有 list_date 时，用「本表内首个交易日」
-        # 作为基准 —— 但这会让**窗口之前上市的股票全部被误判为新股**，
-        # 所以必须打印受影响数量，不能默默接受（P4 静默fallback）。
-        _cal = np.sort(d["date"].unique())
-        _pos = {dt: i for i, dt in enumerate(_cal)}
-        # _cal 是 numpy.datetime64，_ld 是 Timestamp，直接比较会报
-        # "TypeError: '<' not supported between int and Timestamp"，
-        # 统一成 Timestamp 再searchsorted。
-        _cal_ts = pd.DatetimeIndex(_cal)
-        base = d.groupby("code", sort=False)["date"].transform("min")
-        n_fallback = 0
-        if info is not None and "list_date" in info.columns:
-            # ⚠️ list_date 在库里是 float（缺失为 NaN），直接 astype("Int64")
-            #    会报 invalid literal for int() with base 10: '0.0'
-            _ld = info.drop_duplicates("code").set_index("code")["list_date"]
-            _ld = pd.to_numeric(_ld, errors="coerce")
-            _ld = _ld.dropna().astype("int64").astype("string")
-            _ld = pd.to_datetime(_ld, format="%Y%m%d", errors="coerce")
-            if _ld.notna().any():
-                _base_ld = d["code"].map(_ld)
-                n_fallback = int(_base_ld.isna().sum())
-                # 🔴 上市日「早于窗口起点」= 该股在窗口内**每一天**都已上市满 1 年，
-                #    直接判合格，不能拿窗口内序号去比 250 ——
-                #    窗口内序号上界就是窗口交易日数（2024 全年 242 天 < 250），
-                #    于是**每只股票都被淘汰**。本函数在这一点上栽了两次：
-                #      ① 用 rank() 窗口内序号 → 短窗口 100% 淘汰
-                #      ② 改用上市日基准但仍减 searchsorted → 同样全负数
-                #    正确判据只有一句：**上市日早于窗口起点 → 合格**。
-                _before_win = _base_ld.map(
-                    lambda x: bool(pd.notna(x) and len(_cal_ts)
-                                   and x < _cal_ts[0]))
-                _in_win = _base_ld.map(
-                    lambda x: bool(pd.notna(x) and len(_cal_ts)
-                                   and _cal_ts[0] <= x <= _cal_ts[-1]))
-                _ld_pos = _base_ld.map(
-                    lambda x: (_cal_ts.searchsorted(x) if pd.notna(x) else np.nan))
-                age = d["date"].map(_pos) - _ld_pos.where(_in_win, 0)
-                # 上市日缺失 → 退化为「表内首日」基准
-                bad = age.isna()
-                if bad.any():
-                    age[bad] = (d.loc[bad, "date"].map(_pos)
-                                - base[bad].map(_pos))
-                ok = (age >= cfg.min_list_days) | _before_win
-                d = d[ok]
-        if n_fallback:
-            print(f"  ⚠️ {n_fallback:,} 行缺 stock_info.list_date，"
-                  "上市年限按表内首日估算（若窗口早于真实上市日，会误判为新股）")
+        # 2026-10-13 又实测到同源哨兵缺陷（P22 同构）：原实现在缺 list_date 时
+        # 把 NaN 换成真实位置 0（``.where(_in_win, 0)``），退化分支成死代码，
+        # 缺 list_date 的真次新股上市首日即进池、缺 list_date 的老股短窗全灭。
+        # 计龄基准解析见 ``_listing_base``，计龄判定见 ``_listing_age_ok``。
+        d = d[_listing_age_ok(d, cfg, info, first_dates=first_dates)]
     steps.append(("上市满1年", m2, len(d)))
 
     m3 = len(d)
@@ -122,6 +87,113 @@ def build_universe(
         print(f"  最终股票池: {d['code'].nunique():,} 只  {len(d):,} 行")
 
     return d.reset_index(drop=True)
+
+
+def _parse_list_dates(info: pd.DataFrame | None) -> pd.Series:
+    """解析 ``stock_info.list_date`` → 以 code 为索引的 datetime64 序列。
+
+    缺失/不可解析的条目**直接丢掉**，不占位：
+    「有没有上市日」由调用方的独立布尔掩码表达。
+    禁止把缺失值换成真实日期/位置 —— 哨兵会撞上真实值（P22）：
+    2026-10-13 实测 ``.where(_in_win, 0)`` 把 NaN 换成真实位置 0，
+    声称的「缺 list_date → 表内首日」退化分支成死代码（P23）。
+
+    ⚠️ list_date 在库里是 float（缺失为 NaN），直接 astype("Int64")
+       会报 invalid literal for int() with base 10: '0.0'
+    """
+    if info is None or "list_date" not in info.columns:
+        return pd.Series(dtype="datetime64[ns]")
+    s = info.drop_duplicates("code").set_index("code")["list_date"]
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    s = pd.to_datetime(s.astype("int64").astype("string"),
+                       format="%Y%m%d", errors="coerce")
+    return s.dropna()
+
+
+def _listing_base(
+    d: pd.DataFrame,
+    info: pd.DataFrame | None,
+    first_dates: pd.Series | None = None,
+) -> tuple[pd.Series, pd.Series]:
+    """逐行解析「上市计龄基准日」，返回 (基准日, has_list_date 独立掩码)。
+
+    阶梯（每级退化都打印原因与计数，禁静默 fallback）：
+      1. ``stock_info.list_date`` —— 真实上市日（has_list_date=True）
+      2. 行情表 ``bar_daily`` 该 code 的首个数据日（``first_dates``；
+         参数缺省时由 ``load_first_dates()`` 读库）。
+         它是上市日的**下界代理**（首个数据日 ≥ 真实上市日），
+         口径上宁可把老股误判为新股（误杀）也不把次新股错放进池。
+      3. 本长表内该 code 的首个交易日（连行情表首日都取不到时的最后口径）。
+
+    取舍说明（2026-10-13）：缺 list_date 的人群不整只剔除、也不放弃 250 日
+    保护 —— 按表内首日计龄**照常执行同一判据**（对有/无 list_date 语义一致），
+    真次新股（如 bj920 段，数据随上市起步）会被正确保护到第 251 个交易日；
+    数据晚起点的老股在短窗口可能被保守淘汰（与「次新误放」的方向性错误相比
+    是更可接受的一侧），且受影响只数逐次打印可见。
+    """
+    ld = _parse_list_dates(info)
+    has_ld = d["code"].isin(ld.index)
+    base = pd.to_datetime(d["code"].map(ld))
+
+    miss = ~has_ld
+    if miss.any():
+        fd = first_dates if first_dates is not None else load_first_dates()
+        fd = pd.to_datetime(pd.Series(fd))
+        from_db = miss & d["code"].isin(fd.index)
+        from_tbl = miss & ~from_db
+        fill = pd.Series(pd.NaT, index=d.index, dtype="datetime64[ns]")
+        if from_db.any():
+            fill.loc[from_db] = pd.to_datetime(d.loc[from_db, "code"].map(fd)).to_numpy()
+        if from_tbl.any():
+            tbl_first = d.groupby("code", sort=False)["date"].transform("min")
+            fill.loc[from_tbl] = pd.to_datetime(tbl_first[from_tbl]).to_numpy()
+        base = base.fillna(fill)
+        n_codes = int(d.loc[miss, "code"].nunique())
+        n_db = int(d.loc[from_db, "code"].nunique())
+        n_tbl = int(d.loc[from_tbl, "code"].nunique())
+        print(f"  ⚠️ {n_codes} 只缺 stock_info.list_date，按表内首日处理："
+              f"{n_db} 只取行情表首个数据日、{n_tbl} 只取本表首个交易日"
+              f"（缺真实上市日，计龄基准取首个数据日=上市日下界，250 日保护照常执行）")
+    return base, has_ld
+
+
+def _listing_age_ok(
+    d: pd.DataFrame,
+    cfg: ResearchConfig,
+    info: pd.DataFrame | None,
+    first_dates: pd.Series | None = None,
+) -> pd.Series:
+    """逐行判定「上市满 cfg.min_list_days 个交易日」，返回 keep 布尔掩码。
+
+    边界口径（钉死，勿改回）：
+      · 上市当天计龄 0；计龄 ≥ cfg.min_list_days 当天即合格；
+      · 计龄基准早于窗口起点 → 窗口内每一天都已判满，直接合格
+        （这不是精确数龄而是**据实声明的口径**：基准覆盖不到的更早交易日
+        无法计数，按已满计；受影响只数打印出来）。
+    """
+    base, has_ld = _listing_base(d, info, first_dates=first_dates)
+    if base.isna().any():
+        raise RuntimeError(
+            f"{int(base.isna().sum())} 行计龄基准日缺失（_listing_base 阶梯未覆盖），"
+            f"拒绝用 NaN 继续判定 —— NaN 一旦被换成占位值就会撞上真实日期（P22）")
+
+    # ⚠️ 计龄基准早于窗口起点 → 合格，不能拿窗口内序号去比 250 ——
+    #    窗口内序号上界就是窗口交易日数（2024 全年 242 天 < 250），
+    #    于是**每只股票都被淘汰**。本函数在这一点上栽过两次：
+    #      ① rank() 窗口内序号 → 短窗 100% 淘汰
+    #      ② 改按上市日计龄但把 NaN 哨兵换成真实位置 0 → 短窗该人群仍全灭
+    cal_np = pd.to_datetime(pd.Series(np.sort(d["date"].unique()))).to_numpy()
+    dates_np = pd.to_datetime(d["date"]).to_numpy()
+    base_np = base.to_numpy()
+    before = base_np < cal_np[0]
+    age = np.searchsorted(cal_np, dates_np) - np.searchsorted(cal_np, base_np)
+    ok = (age >= cfg.min_list_days) | before
+    if before.any():
+        n = int(d.loc[before, "code"].nunique())
+        print(f"  ℹ️ {n} 只计龄基准早于窗口起点，按已满 {cfg.min_list_days} 交易日计")
+    return pd.Series(np.asarray(ok, dtype=bool), index=d.index)
 
 
 def summarize_universe(long: pd.DataFrame) -> pd.DataFrame:

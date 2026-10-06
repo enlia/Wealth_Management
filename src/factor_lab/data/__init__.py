@@ -3,6 +3,7 @@
 from .sqlite_source import (
     all_codes,
     available_code_count,
+    load_first_dates,
     load_long,
     load_prices,
     load_sector_members,
@@ -14,6 +15,7 @@ from .sqlite_source import (
 __all__ = [
     "all_codes",
     "available_code_count",
+    "load_first_dates",
     "load_long",
     "load_prices",
     "load_sector_members",
