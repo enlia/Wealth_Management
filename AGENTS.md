@@ -59,14 +59,18 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 
 | 文件                                 | 内容                               | 行数 |
 | ------------------------------------ | ---------------------------------- | ---- |
-| `.github/standards/ENGINEERING.md` | **工程规范全文，最高优先级** | —  |
-| `.github/standards/PITFALLS.md`    | 金融与数据踩坑（P1~P18，6 条结论反转） | 431 |
+| `.github/standards/ENGINEERING.md` | **工程规范全文，最高优先级** | 485 |
+| `.github/standards/PITFALLS.md`    | 金融与数据踩坑（8 条结论反转） | 435 |
 | `.github/standards/UNITS.md`         | **单位与量纲（U1~U2）** | 83 |
-| `.github/standards/TOOLING.md`     | 工具链踩坑（lint / git / CI / 依赖）  | —  |
-| `.github/standards/DATA_QUALITY.md` | **判据设计踩坑（Q1~Q12）** | 321 |
-| `.github/standards/DATA_SOURCE.md`  | **外部数据源 API 踩坑（S1~S10）** | — |
+| `.github/standards/CODE_TRUST.md`    | **代码/注释可信度（P22~P23）** | 81 |
+| `.github/standards/TOOLING.md`     | 工具链踩坑（lint / git / CI / 依赖）  | 60 |
+| `.github/standards/DATA_QUALITY.md` | **判据设计踩坑（Q1~Q13）** | 520 |
+| `.github/standards/DATA_SOURCE.md`  | **外部数据源 API 踩坑（S1~S10）** | 382 |
 
-**四类踩坑的排查手法不同，别混用**：
+> ⚠️ 任何规范文件 **≤ 500 行**（400~500 强制拆分）。
+> `DATA_QUALITY.md` 已达520 行，**待拆分**。
+
+**五类踩坑的排查手法不同，别混用**：
 
 | 类别 | 怎么看 |
 |---|---|
@@ -74,6 +78,7 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | `DATA_QUALITY` | **找反例** —— 怀疑判据本身错了 |
 | `DATA_SOURCE` | **实测接口** —— 文档说的可能和实际不一样 |
 | `UNITS` | **找已知真值反推** —— 数字看着合理不代表量纲对 |
+| `CODE_TRUST` | **写还原测试** —— 代码和注释都会说谎，只有测试不会 |
 
 ---
 
@@ -231,8 +236,16 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | **P17** | **回测前必做数据审计** | 🔴 **2.33pp 年化偏差** |
 | **P18** | **pandas 广播陷阱** | 🔴 **空索引广播成 100%** |
 | **P19** | **市值量纲亿元 vs 万元** | 🔴 **差 1 万倍且不报错** |
+| **P22** | **哨兵值映射到真实索引** | 🔴 **持仓权重被静默抹零** |
+| **P23** | **注释声称有保护、代码没有** | 🔴 **20 日 +8% 报成 +183% 年化** |
 
-🔴 **P10 / P15 / P16 / P17 / P18 / P19 会导致结论方向性反转**，review 时最高优先级。
+🔴 **P10 / P15 / P16 / P17 / P18 / P19 / P22 / P23 会导致结论方向性反转**，review 时最高优先级。
+
+> P19 是量纲类问题 → 详见 `UNITS.md`。
+> P22 / P23 是**代码与注释可信度**问题，与金融口径无关但同样致命——
+> 它们让 review 误以为「上一轮已经修好了」。
+> 实测：子agent review 报出的 3 个 BLOCK 全部成立；
+> 而我自己写守护测试时，又抓到 review 都没发现的第 4 个（持仓权重被抹零）。
 
 ---
 
