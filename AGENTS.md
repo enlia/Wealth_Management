@@ -63,7 +63,7 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | `.github/standards/PITFALLS.md`    | 金融与数据踩坑（20 条，6 条结论反转） | —  |
 | `.github/standards/TOOLING.md`     | 工具链踩坑（lint / git / CI / 依赖）  | —  |
 | `.github/standards/DATA_QUALITY.md` | **判据设计踩坑（Q1~Q12）** | 321 |
-| `.github/standards/DATA_SOURCE.md`  | **外部数据源 API 踩坑（S1~S9）** | 241 |
+| `.github/standards/DATA_SOURCE.md`  | **外部数据源 API 踩坑（S1~S10）** | — |
 
 **三类踩坑的排查手法不同，别混用**：
 
