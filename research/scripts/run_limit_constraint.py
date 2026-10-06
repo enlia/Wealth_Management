@@ -60,9 +60,9 @@ def load_close_raw(codes: list[str], start: str, end: str,
     """读**未复权**收盘价面板（涨跌停判定的唯一正确口径）。
 
     ⚠️ **必须是未复权价**，不能用 close_adj ——
-       实测 sh6005192024-01-02 收盘 1685.01 / 后复权 1531.31，
+       实测 sh6005192024-01-02 收盘 1685.01 / 前复权 1531.31，
        差 9%，而涨停判定阈值是 0.01 元级。
-       拿后复权价比原始涨跌停价，几乎所有股票都判成「未封板」：
+       拿前复权价比原始涨跌停价，几乎所有股票都判成「未封板」：
        约束彻底失效却不报任何错（tradability.limit_masks 有同样警示）。
     """
     import sqlite3
@@ -253,7 +253,8 @@ def main() -> int:
     close_raw = close_raw.reindex(columns=list(price.columns))
     if close_raw.shape[1] != price.shape[1]:
         print(f"⚠ 未复权面板列数 {close_raw.shape[1]} ≠ 因子面板 "
-              f"{price.shape[1]}，缺数据的股票将被判不可交易")
+              f"{price.shape[1]}，缺数据的股票默认视为可交易"
+              f"（unlisted_state=tradable）")
     (buy_ok, sell_ok, limit_up_raw, limit_dn_raw,
      up_raw, dn_raw) = build_masks(close_raw, start, end)
 
