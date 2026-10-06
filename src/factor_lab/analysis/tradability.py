@@ -210,10 +210,38 @@ def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
             f"up 索引 {type(up.index).__name__}\n"
             f"  ⚠️ 若继续执行，缺数据会被判为「不可交易」"
             f"（可能一只都买不了）且不报错。")
-    # ⚠️ **涨跌停价缺失一律当「封板」**（= 不可交易，保守方向）：
-    #   这与 `close` 缺失是两回事 —— 前者是「本该有数据却没有」
-    #   （数据缺口，保守处理），后者是「本来就没交易」（见 unlisted_state）。
-    no_px = up.isna() | dn.isna()
+    # ⚠️⚠️ **「缺涨跌停价」必须先限定在「当日确实有 close」范围内**
+    #   （2026-10-06 实测 BLOCK，review 后修复）：
+    #
+    #   初版是无条件封板：
+    #       no_px = up.isna() | dn.isna()
+    #       limit_up = (close >= up - tol) | no_px
+    #
+    #   而 Tushare `stk_limit` **在股票未上市/ 已退市的日子里本来就没有行**，
+    #   ��此「未上市」⇒ `up` 为 NaN ⇒ `no_px=True` ⇒ **照样被判封涨停**。
+    #   ⇒ `unlisted_state="tradable"` 这条修复**根本没机会生效**：
+    #     它只管「有涨跌停价但无 close」，而未上市这个主体场景
+    #     在更早的 `no_px` 分支就被拦下了。
+    #
+    #   实测（2016-2026 全市场 A 股 5,921 只 × 2,611 日 = 1,546 万格）：
+    #
+    #   | 口径| 买不进 | 卖不掉 |
+    #   |---|---|---|
+    #   | 初版（no_px 无条件） | **27.817%** | **27.179%** |
+    #   | 修正版（no_px & 有 close） | **1.164%** | **0.526%** |
+    #   | 真实封板强度 | 1.048% | 0.410% |
+    #
+    #   `no_px` 的 4,138,520 格里有 **99.6%** 是「close 也缺失」
+    #   （未上市/已退市），只有 0.116% 是真正的上市期间数据空洞。
+    #   ⇒ 把前者一并封掉，等于凭空多阻塞 26.77pp，
+    #     后果与 BLOCK-2 声称修复的完全相同：退市股僵尸锁仓 + 股票池缩小。
+    #
+    #   修正后买不进 1.164% 与真实封板 1.048% 只差 0.12pp —— 口径自洽。
+    no_px_all = up.isna() | dn.isna()
+    # 只在「本来就有成交」的地方谈涨跌停：
+    # 有 close 但缺价= 真数据空洞 ⇒ 保守判不可交易（安全的一侧）
+    # 无 close ⇒ 未上市/已退市 ⇒ 交给 unlisted_state 决定，不在此处封板
+    no_px = no_px_all & close.notna()
     limit_up = (close >= up - tol) | no_px
     limit_dn = (close <= dn + tol) | no_px
     if unlisted_state == "blocked":

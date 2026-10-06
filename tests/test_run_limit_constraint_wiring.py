@@ -201,24 +201,63 @@ class TestUnlistedStateDefault:
     """
 
     def test_默认不把未上市判成封板(self):
+        """🔴 **本测试的断言在 2026-10-06 被推翻重写，理由见下。**
+
+        ## 原断言错在哪
+
+        原代码长这样（**名字说「不判封板」，断言却写 `is True`**）：
+
+        ```python
+        lu, ld = limit_masks(close, up, dn)     # 默认 tradable
+        # c1 无涨跌停价 ⇒ 仍判不可交易（数据缺口保守处理）
+        assert bool(lu.iloc[0, 1]) is True      # ← 与测试名矛盾
+        ```
+
+        并注释「判定依据是『涨跌停价缺失』而非『未上市』」，
+        于是改用「有涨停价但 close 缺失」的构造面板来验证。
+
+        ## 为什么那是自欺
+
+        **真实数据里「有涨跌停价但 close 缺失」几乎不存在。**
+        Tushare `stk_limit` 是按交易日给的涨跌停价表，
+        股票未上市/ 已退市的日子**本来就没有行**⇒ `up` 必然是 NaN。
+
+        ⇒ 原测试用一个人为构造、真实数据里不存在的场景去验证「已修好」，
+          而真实场景（未上市 ⇒ 无涨跌停价）被写成断言 `is True` 并附上
+          「保守处理」的合理化注释。
+        **测试全绿，但没测到真实路径** —— 典型的 CODE_TRUST P23：
+        注释声称有保护，代码没有。
+
+        实测（2016-2026 全市场 A 股 5,921 只 × 2,611 日）：
+
+        | 口径 | 买不进 | 卖不掉 |
+        |---|---|---|
+        | 修复前 | **27.817%** | **27.179%** |
+        | 修复后 | 1.164% | 0.526% |
+        | 真实封板强度 | 1.048% | 0.410% |
+
+        `no_px` 的 4,138,520 格里 **99.6%** 是「close 也缺失」。
+        """
         close, up, dn = _panels()
-        # c1 未上市（close/涨停价全缺）
-        close = close.copy()
-        close.iloc[0, 1] = np.nan
+        # c1 未上市：**close / 涨停价 / 跌停价全缺**（真实数据的样子）
+        close = close.copy(); close.iloc[0, 1] = np.nan
         up = up.copy(); up.iloc[0, 1] = np.nan
         dn = dn.copy(); dn.iloc[0, 1] = np.nan
 
         lu, ld = limit_masks(close, up, dn)     # 默认 tradable
-        # c1 无涨跌停价 ⇒ 仍判不可交易（数据缺口保守处理）
-        assert bool(lu.iloc[0, 1]) is True
-        #⚠️ 关键：判定依据是「涨跌停价缺失」而非「未上市」——
-        #   所以下面这个测试必须用「有涨停价但 close 缺失」来区分。
+
+        # 🔴 核心断言：未上市**不得**判封板，否则退市股僵尸锁仓
+        assert bool(lu.iloc[0, 1]) is False, (
+            "未上市被判买不进 ⇒ no_px 绕过了 unlisted_state")
+        assert bool(ld.iloc[0, 1]) is False, (
+            "未上市被判卖不掉 ⇒ 退市股 sell_ok 恒 False ⇒ 僵尸持仓锁仓")
+
+        # 有涨跌停价但无成交（停牌）⇒ 同样不判封板
         close2, up2, dn2 = _panels()
         close2.iloc[0, 1] = np.nan# close 缺，但有涨停价
         lu2, ld2 = limit_masks(close2, up2, dn2)
         assert bool(lu2.iloc[0, 1]) is False, (
-            "有涨停价、只是没成交 ⇒ 默认不该判封板"
-            "（否则未上市/已退市会被永久锁仓）")
+            "有涨停价、只是没成交 ⇒ 默认不该判封板")
 
     def test_显式要求时可以判不可交易(self):
         close, up, dn = _panels()

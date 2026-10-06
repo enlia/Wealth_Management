@@ -300,13 +300,35 @@ class TestMaskSemantics:
         assert bool(ld.iloc[0, 2]) is True, "c2 收盘==跌停价，应判封跌停"
 
     def test_缺数据判不可交易(self):
-        """close 缺失（停牌/未上市）⇒ 买不进、也卖不掉。
+        """**上市期间**有close 但涨跌停价缺失 ⇒ 买不进、也卖不掉。
+
         ⚠️ 反向（缺数据判「可交易」）是本项目已踩过的坑。
+
+        🔴 **2026-10-06 修正**：原断言是「`close` 缺失 ⇒ 判不可交易」，
+        那把**两种成因**混为一谈：
+
+        | 成因 | 正确处理 | 实测占比 |
+        |---|---|---|
+        | **未上市 / 已退市**（close 与涨跌停价都缺） | 不判封板 | **99.6%** |
+        | **上市期间数据空洞**（有 close，缺涨跌停价） | 保守判不可交易 | 0.116% |
+
+        `stk_limit` 在未上市日**本来就没有行** ⇒ 后者才是真实存在的缺口。
+        把前者一并封掉会凭空多阻塞 26.77pp（实测买不进 27.817% vs 真实 1.048%），
+        并导致退市股僵尸锁仓。
+
+        ⇒ 本测试现在只守**后者**：有 close、无涨跌停价 ⇒ 封板。
+           未上市的情形由 `tests/test_tradability.py::TestNoPxDoesNotBlockUnlisted` 守。
         """
         from factor_lab.analysis.tradability import limit_masks
-        close = pd.DataFrame([[10.0, np.nan]], index=["d"], columns=["c0", "c1"])
-        up = pd.DataFrame([[9.0, np.nan]], index=["d"], columns=["c0", "c1"])
-        dn = pd.DataFrame([[11.0, np.nan]], index=["d"], columns=["c0", "c1"])
+        # c0 有close 但**缺涨跌停价** ⇒ 真实数据缺口 ⇒ 保守封板
+        close = pd.DataFrame([[10.0, 9.5]], index=["d"], columns=["c0", "c1"])
+        up = pd.DataFrame([[np.nan, 10.5]], index=["d"], columns=["c0", "c1"])
+        dn = pd.DataFrame([[np.nan, 8.5]], index=["d"], columns=["c0", "c1"])
         lu, ld = limit_masks(close, up, dn)
-        assert bool(lu.iloc[0, 1]) is True, "缺 close 应判不可买"
-        assert bool(ld.iloc[0, 1]) is True, "缺 close 应判不可卖"
+        assert bool(lu.iloc[0, 0]) is True, (
+            "有 close 但缺涨跌停价 ⇒ 无法判断封板，应保守判买不进")
+        assert bool(ld.iloc[0, 0]) is True, (
+            "有 close 但缺涨跌停价 ⇒ 应保守判卖不掉")
+        # 对照：c1 涨跌停价齐全且未封板 ⇒ 可交易
+        assert bool(lu.iloc[0, 1]) is False, "c1 正常，不该判封涨停"
+        assert bool(ld.iloc[0, 1]) is False, "c1 正常，不该判封跌停"
