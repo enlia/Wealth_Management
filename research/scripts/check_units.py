@@ -45,7 +45,9 @@ from factor_lab.config import DB_PATH, MARKET_CAP_UNIT, YI_TO_WAN  # noqa: E402
 # 其他权益工具口径项入探针清单（U6）：再加两只其他权益工具存量大户
 # （market.db ts_balance_sheet@20260630 实测 oth_eqt_tools：招商银行
 #   1999.89 亿、农业银行 4700.0 亿；sz000001 自带 800.0 亿），
-# 探针 4→6 覆盖「有/无其他权益工具」两种权益切分形态。
+# 探针 4→6 覆盖「有/无其他权益工具」两种权益切分形态；再补 sh600011
+# （oth_eqt_tools 734.75 亿 = 归母 53.25% + minority 727.91 亿 = 归母 52.75%
+#   双高极端，敞口谱唯一推到 ≥18% 档的天然边界锚），探针 6→7。
 PROBES = [
     ("sh600519", "600519.SH", "贵州茅台（大盘蓝筹）"),
     ("sz000001", "000001.SZ", "平安银行（深主板）"),
@@ -53,6 +55,7 @@ PROBES = [
     ("sz300750", "300750.SZ", "宁德时代（创业板）"),
     ("sh600036", "600036.SH", "招商银行（其他权益工具大户）"),
     ("sh601288", "601288.SH", "农业银行（其他权益工具大户）"),
+    ("sh600011", "600011.SH", "华能国际（其他权益工具+少数股东权益双高边界锚）"),
 ]
 
 TOL = 0.01          # 1% 容差（Tushare 与通达信都只保留有限小数）
@@ -149,10 +152,14 @@ def require_oth_eqt_tools_column(con: sqlite3.Connection) -> None:
 # ① 恒等式：含少数股东权益 − 归母权益 = 少数股东权益。数值为亿元；
 #    补/调整行（update_flag=1）三分量各带 ±0.005 的两位小数舍入 → 残差界
 #    ±0.015，容差收 0.02。
-# ② 自洽：price / bps ≈ pb。pb 为两位小数（舍入界 <0.1%），容差收 1%；
+# ② 自洽：price / bps ≈ pb。pb 两位小数的舍入界是绝对 ±0.005，相对界 = 0.005/pb
+#    （pb=5 时约 0.1%、pb=0.48 时约 1.0%、pb=0.20 时约 2.5%——「舍入界 <0.1%」
+#    的旧论证只对 pb≥5 成立，低 pb 票会被 1% 相对容差误拦）；容差取复合
+#    max(0.0051, 0.01×pb)（绝对量纲）＝ max(两位小数舍入界, 1% 相对带)。
 #    超限即 price/市值 与 bps/pb 属不同日期快照混装（快照混日期的露馅点）。
 IDENTITY_ABS_TOL_YI = 0.02
 PB_REL_TOL = 0.01
+PB_ROUND_ABS_TOL = 0.0051
 
 
 def equity_identity_guard(inc_min_int_yi, exc_min_int_yi, minority_int_yi) -> dict:
@@ -180,30 +187,35 @@ def equity_identity_guard(inc_min_int_yi, exc_min_int_yi, minority_int_yi) -> di
 
 
 def snapshot_pb_guard(price, bps, pb) -> dict:
-    """守卫②：`price / bps ≈ pb`（相对容差 PB_REL_TOL）。
+    """守卫②：`price / bps ≈ pb`（复合容差 max(0.0051, 0.01×pb)，绝对量纲）。
 
     超限 = stock_info 的 price/市值 与 bps/pb 不是同一日期快照（混日期露馅）。
-    任一输入 NULL / bps≤0 / pb≤0 → checkable=False 并点名缺项，不冒算。
+    任一输入 NULL 或 ≤0（price≤0 覆盖停牌/退市形态、脏数据形态）→ checkable=False
+    并点名缺项，不冒算。
     """
     fields = (("price", price), ("bps", bps), ("pb", pb))
     missing = [name for name, v in fields if v is None]
     if missing:
         return {"checkable": False, "missing": missing, "tol": PB_REL_TOL}
-    if float(bps) <= 0 or float(pb) <= 0:
+    nonpos = [name for name, v in fields if float(v) <= 0]
+    if nonpos:
         return {
             "checkable": False,
-            "missing": [n for n, v in (("bps", bps), ("pb", pb)) if float(v) <= 0],
+            "missing": nonpos,
             "tol": PB_REL_TOL,
         }
     ratio = float(price) / float(bps)
-    rel_err = abs(ratio - float(pb)) / abs(float(pb))
+    abs_dev = abs(ratio - float(pb))
+    rel_err = abs_dev / abs(float(pb))
+    tol = max(PB_ROUND_ABS_TOL, PB_REL_TOL * abs(float(pb)))
     return {
         "checkable": True,
         "missing": [],
         "ratio": ratio,
         "rel_err": rel_err,
-        "tol": PB_REL_TOL,
-        "pass": rel_err <= PB_REL_TOL,
+        "abs_dev": abs_dev,
+        "tol": tol,
+        "pass": abs_dev <= tol,
     }
 
 
@@ -306,6 +318,12 @@ def probe_equity_row(con: sqlite3.Connection, code: str) -> dict:
     end_date, exc, inc, minority, oth, share = row
     if exc is None:
         return {"code": code, "status": f"归母 NULL（bs {end_date}）—— 不可反推"}
+    if not share:
+        return {
+            "code": code,
+            "status": f"缺 total_share（bs {end_date}）—— 反推分母不可用，显式缺件态不冒算",
+            "bs_end_date": end_date,
+        }
     bps_row = con.execute(
         "SELECT bps, end_date FROM ts_fina_indicator WHERE ts_code=?"
         " ORDER BY end_date DESC LIMIT 1",
@@ -352,7 +370,13 @@ def check_equity_caliber(con: sqlite3.Connection) -> tuple[list[str], list[str]]
           f"{'relC':>10}{'relA(对照)':>12}  判定")
     print("-" * 72)
     for code, _ts, name in PROBES:
-        p = probe_equity_row(con, code)
+        try:
+            p = probe_equity_row(con, code)
+        except Exception as exc:  # noqa: BLE001 — 单票异常逐票捕获归 msgs，不许断全轮
+            msgs.append(
+                f"{name} {code}：探针异常，已逐票捕获（{type(exc).__name__}: {exc}）"
+            )
+            continue
         if p["status"] != "ok":
             msgs.append(f"{name} {code}：{p['status']}")
             print(f"{name:<26}{'-':>14}{'-':>10}{'-':>10}{'-':>10}{'-':>12}  ✗ {p['status']}")
@@ -388,7 +412,7 @@ def check_equity_caliber(con: sqlite3.Connection) -> tuple[list[str], list[str]]
         elif not g["pass"]:
             warns.append(
                 f"{name} {code}：price/bps={g['ratio']:.5f} vs pb 快照值偏离 {g['rel_err']:.2%}"
-                f"（容差 {g['tol']:.0%}）—— stock_info 快照混日期嫌疑"
+                f"（复合容差 ±{g['tol']:.4f}）—— stock_info 快照混日期嫌疑"
             )
     return msgs, warns
 
