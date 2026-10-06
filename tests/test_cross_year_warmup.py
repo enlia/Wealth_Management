@@ -201,7 +201,16 @@ class TestRankTopkNaN:
         ⚠️ 只断言「1 月初有值」不够 ——
         若某天恰好有值但覆盖率极低，仍可能触发 BLOCK-2。
         故断言**有效股票数**的量级。
+
+        ⚠️ 本用例依赖真实数据库 `data/market.db`（不进 git）：
+        库不存在即跳过（CI 干净环境、未下载数据的环境），
+        有库环境照常全市场实跑 —— 不能让它 error，那会卡红整条测试线。
         """
+        from factor_lab.config import DB_PATH
+        if not DB_PATH.exists():
+            pytest.skip(f"缺 {DB_PATH} —— market.db 不进 git，"
+                        "无数据环境跳过，有库环境照常全市场实跑")
+
         from run_long_only import build_panel, _cross_z
         from factor_lab.config import is_a_share
         from factor_lab.data import all_codes
