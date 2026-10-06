@@ -1,16 +1,18 @@
-"""日频 → 年频折算统一按 **243 交易日**（A股实测），不再是 252。
+"""日频 → 年频折算按 **252 交易日惯例**（PITFALLS P10 公式口径）。
 
-## 为什么要钉
+## 口径来源
 
-`engine.simulate_matrix` 的年化波动、平均年成本曾按 252（美股口径）折算，
-而同文件注释、`_year_span` 兜底分支都认定 A 股一年实际约 243 个交易日 ——
-同一份数据两套折算，年频量系统性差约 3.5%，且不报错（P10 尾巴）。
+规范真源 `.github/standards/PITFALLS.md` P10 钉死公式：
+`gross = spread * (252 / periods[0])` —— 全规范与既有报告数字均为 252 口径。
+`engine.TRADING_DAYS` 是全仓该常数的唯一出处。
+⚠️ 若改 243（A股实际年均交易日）属**全项目口径变更**，
+   需单独立项重刷历史数字的可比性；本文件即该决议的守门人。
 
 ## 判据
 
-按 UNITS 的「找已知真值反推」：手工给定持仓/权重/收益，
-把年化波动与年成本的**已知真值**写死在断言里，
-并加「还原旧版（×252）必须失败」的反向断言 —— 防止悄悄退回 252。
+按 UNITS「找已知真值反推」：给定持仓/权重/收益，年化波动与平均年成本的
+算式逐步写在用例注释里（可复核、可重算）；
+另有反向断言钉住「退回 243 必须失败」、「常数被改必须失败」。
 """
 from __future__ import annotations
 
@@ -26,15 +28,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from factor_lab.analysis.costs import CostModel  # noqa: E402
-from factor_lab.analysis.engine import simulate_matrix  # noqa: E402
+from factor_lab.analysis.engine import TRADING_DAYS, simulate_matrix  # noqa: E402
 from factor_lab.analysis.spec import PortfolioSpec  # noqa: E402
 
 DATES = pd.date_range("2023-01-02", periods=3, freq="B")
 
 
 class TestDailyToYearScale:
-    def test_年化波动按243交易日折算_不是252(self):
-        """日收益 [0.01, 0, 0] 的已知真值：std(ddof=1)×√243。"""
+    def test_年化波动按252交易日折算(self):
+        """日收益 [0.01, 0, 0] 的已知真值（算式可复核）：
+
+        均值        = 0.01/3                             ≈ 0.0033333
+        Σ(x−mean)²  = 0.0066667² + 2×0.0033333²          = 6.66667e-5
+        std(ddof=1) = √(6.66667e-5 / 2)                  ≈ 0.0057735
+        年化波动     = std × √252 ≈ 0.0057735 × 15.87451  ≈ 0.091652
+        """
         fwd = pd.DataFrame({"sh600000": [0.01, 0.0, 0.0]}, index=DATES)
         res = simulate_matrix(
             DATES, np.array([[0], [0], [0]]), np.array([[1.0], [1.0], [1.0]]),
@@ -42,15 +50,21 @@ class TestDailyToYearScale:
         assert res["ok"], res.get("reason")
         daily_std = float(np.std([0.01, 0.0, 0.0], ddof=1))
         assert res["年化波动"] == pytest.approx(
-            daily_std * math.sqrt(243), rel=1e-9)
+            daily_std * math.sqrt(252), rel=1e-9)
         assert res["年化波动"] != pytest.approx(
-            daily_std * math.sqrt(252), rel=1e-3), (
-            "又退回 252 折算了 —— A 股一年约 243 个交易日，见模块注释")
+            daily_std * math.sqrt(243), rel=1e-3), (
+            "折算被改成 243 —— 全项目口径是 252（PITFALLS P10 公式口径），"
+            "改 243 需单独立项重刷历史数字可比性，不能悄悄改")
 
-    def test_平均年成本按243交易日折算_不是252(self):
-        """一次调仓换手 L1=2 的已知真值：turn×(buy+sell)/2 按 243 年化。
+    def test_平均年成本按252交易日折算(self):
+        """一次调仓换手 L1=2 的已知真值（算式可复核）：
 
-        持仓第 1 天从列 0 换到列 1：全股票空间 L1 差 = 2（卖 1 买 1）。
+        CostModel 默认：commission=0.00025、transfer_fee=0.00001、
+          slippage=0.001 ⇒ buy = 0.00126；stamp_duty=0.0005 ⇒ sell = 0.00176
+        单边均值 (buy+sell)/2         = 0.00151
+        持仓列 0→1（卖 1 买 1）L1 = 2 ⇒ 日成本 = 2×0.00151 = 0.00302
+        3 行均值 = 0.00302/3           ≈ 0.00100667
+        平均年成本 = 0.00100667 × 252  ≈ 0.255680
         """
         fwd = pd.DataFrame({"sh600000": [0.0, 0.0, 0.0],
                             "sz000001": [0.0, 0.0, 0.0]}, index=DATES)
@@ -61,10 +75,19 @@ class TestDailyToYearScale:
         cost = CostModel()
         per_day = [0.0, 2.0 * (cost.buy + cost.sell) / 2, 0.0]
         assert res["平均年成本"] == pytest.approx(
-            sum(per_day) / 3 * 243, rel=1e-9)
+            sum(per_day) / 3 * 252, rel=1e-9)
         assert res["平均年成本"] != pytest.approx(
-            sum(per_day) / 3 * 252, rel=1e-3), (
-            "又退回 252 折算了 —— A 股一年约 243 个交易日，见模块注释")
+            sum(per_day) / 3 * 243, rel=1e-3), (
+            "折算被改成 243 —— 全项目口径是 252（PITFALLS P10 公式口径），"
+            "改 243 需单独立项重刷历史数字可比性，不能悄悄改")
+
+    def test_折算常数钉死252并与P10公式口径一致(self):
+        """常数 = 252，与 PITFALLS P10 公式 `gross = spread * (252 / periods[0])`
+        的 252 同一口径；全仓该常数的唯一出处是 engine.TRADING_DAYS。"""
+        assert TRADING_DAYS == 252, (
+            f"TRADING_DAYS={TRADING_DAYS} —— 全项目年化口径是 252"
+            "（PITFALLS P10 公式口径），"
+            "改口径需单独立项并重刷历史数字可比性")
 
 
 if __name__ == "__main__":
