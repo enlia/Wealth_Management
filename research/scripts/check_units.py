@@ -139,6 +139,68 @@ def require_oth_eqt_tools_column(con: sqlite3.Connection) -> None:
         )
 
 
+# ── U6 两守卫（权益切分恒等式 + 快照自洽），容差显式 ───────────────
+# ① 恒等式：含少数股东权益 − 归母权益 = 少数股东权益。数值为亿元；
+#    补/调整行（update_flag=1）三分量各带 ±0.005 的两位小数舍入 → 残差界
+#    ±0.015，容差收 0.02。
+# ② 自洽：price / bps ≈ pb。pb 为两位小数（舍入界 <0.1%），容差收 1%；
+#    超限即 price/市值 与 bps/pb 属不同日期快照混装（快照混日期的露馅点）。
+IDENTITY_ABS_TOL_YI = 0.02
+PB_REL_TOL = 0.01
+
+
+def equity_identity_guard(inc_min_int_yi, exc_min_int_yi, minority_int_yi) -> dict:
+    """守卫①：`含少数 − 归母 = 少数股东权益`（亿元，容差 IDENTITY_ABS_TOL_YI）。
+
+    任一输入为 NULL → checkable=False 并点名缺哪项，不冒算不静默归 0
+    （实测 sz000001 的 minority_int 为 NULL：inc==exc，恒等式不可检）。
+    """
+    fields = (
+        ("total_hldr_eqy_inc_min_int", inc_min_int_yi),
+        ("total_hldr_eqy_exc_min_int", exc_min_int_yi),
+        ("minority_int", minority_int_yi),
+    )
+    missing = [name for name, v in fields if v is None]
+    if missing:
+        return {"checkable": False, "missing": missing, "tol_yi": IDENTITY_ABS_TOL_YI}
+    residual = float(inc_min_int_yi) - float(exc_min_int_yi) - float(minority_int_yi)
+    return {
+        "checkable": True,
+        "missing": [],
+        "residual_yi": residual,
+        "tol_yi": IDENTITY_ABS_TOL_YI,
+        "pass": abs(residual) <= IDENTITY_ABS_TOL_YI,
+    }
+
+
+def snapshot_pb_guard(price, bps, pb) -> dict:
+    """守卫②：`price / bps ≈ pb`（相对容差 PB_REL_TOL）。
+
+    超限 = stock_info 的 price/市值 与 bps/pb 不是同一日期快照（混日期露馅）。
+    任一输入 NULL / bps≤0 / pb≤0 → checkable=False 并点名缺项，不冒算。
+    """
+    fields = (("price", price), ("bps", bps), ("pb", pb))
+    missing = [name for name, v in fields if v is None]
+    if missing:
+        return {"checkable": False, "missing": missing, "tol": PB_REL_TOL}
+    if float(bps) <= 0 or float(pb) <= 0:
+        return {
+            "checkable": False,
+            "missing": [n for n, v in (("bps", bps), ("pb", pb)) if float(v) <= 0],
+            "tol": PB_REL_TOL,
+        }
+    ratio = float(price) / float(bps)
+    rel_err = abs(ratio - float(pb)) / abs(float(pb))
+    return {
+        "checkable": True,
+        "missing": [],
+        "ratio": ratio,
+        "rel_err": rel_err,
+        "tol": PB_REL_TOL,
+        "pass": rel_err <= PB_REL_TOL,
+    }
+
+
 def check_self_consistency(con: sqlite3.Connection) -> list[str]:
     """本机自洽性：mktcap / shares 能否还原出股价。"""
     msgs = []

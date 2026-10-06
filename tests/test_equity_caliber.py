@@ -37,11 +37,15 @@ sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
 from check_units import (  # noqa: E402
     FAMILY_OTH_EQT_TOOLS,
+    IDENTITY_ABS_TOL_YI,
+    PB_REL_TOL,
     compare_bps_with_db,
+    equity_identity_guard,
     implied_bps_a,
     implied_bps_c,
     ordinary_equity_yi,
     require_oth_eqt_tools_column,
+    snapshot_pb_guard,
 )
 
 # 四票夹具：(code, 归母权益亿元, 其他权益工具亿元(NULL→None), 总股本股, 库内 bps 元/股)
@@ -141,3 +145,80 @@ class TestCoalesceSemantics:
         con = sqlite3.connect(":memory:")
         with pytest.raises(RuntimeError, match="ts_balance_sheet"):
             require_oth_eqt_tools_column(con)
+
+
+class TestEquityIdentityGuard:
+    """恒等式守卫：含少数股东权益 − 归母权益 = 少数股东权益（U6 规则②）。
+
+    输入为 market.db ts_balance_sheet@20260630 实值；好坏样本双向：
+    成立过、破坏拦、NULL 显式不可检。"""
+
+    def test_容差显式为两位舍入残差界(self) -> None:
+        assert IDENTITY_ABS_TOL_YI == 0.02
+
+    def test_恒等式成立通过_600519实值(self) -> None:
+        g = equity_identity_guard(2620.9635217436, 2512.535944195, 108.42757754860001)
+        assert g["checkable"] and g["pass"], g
+        assert abs(g["residual_yi"]) < 1e-9
+
+    def test_恒等式破坏被拦(self) -> None:
+        g = equity_identity_guard(2620.9635217436, 2512.535944195, 118.42757754860001)
+        assert g["checkable"] and not g["pass"], g
+        assert abs(g["residual_yi"] - (-10.0)) < 1e-9
+
+    def test_容差内过界外拦(self) -> None:
+        inside = equity_identity_guard(100.0, 50.0, 49.981)   # 残差 0.019
+        outside = equity_identity_guard(100.0, 50.0, 49.979)  # 残差 0.021
+        assert inside["pass"] and not outside["pass"], (inside, outside)
+
+    def test_minority为NULL不可检且点名缺项(self) -> None:
+        g = equity_identity_guard(5482.14, 5482.14, None)     # sz000001 形态
+        assert not g["checkable"], g
+        assert g["missing"] == ["minority_int"]
+
+    def test_输入缺项不冒算(self) -> None:
+        g = equity_identity_guard(None, 5482.14, 0.0)
+        assert not g["checkable"]
+        assert g["missing"] == ["total_hldr_eqy_inc_min_int"]
+
+
+class TestSnapshotPbGuard:
+    """自洽守卫：price / bps ≈ pb（U6 规则②）——stock_info 快照混日期在此露馅。
+
+    输入为 market.db stock_info 快照实值；同日快照过、混日期快照拦。"""
+
+    def test_容差显式为1pct(self) -> None:
+        assert PB_REL_TOL == 0.01
+
+    @pytest.mark.parametrize(
+        ("code", "price", "bps", "pb"),
+        [
+            ("sh600519", 1258.62, 200.99, 6.26),   # price/bps=6.26210 ≈ 6.26 ✓
+            ("sz000001", 11.57, 24.129, 0.48),      # 0.479506 ≈ 0.48 ✓
+            ("sh600036", 41.26, 45.4, 0.91),        # 0.908811 ≈ 0.91 ✓
+        ],
+    )
+    def test_同日快照通过(self, code, price, bps, pb) -> None:
+        g = snapshot_pb_guard(price, bps, pb)
+        assert g["checkable"] and g["pass"], (code, g)
+
+    @pytest.mark.parametrize(
+        ("code", "price", "bps", "pb", "ratio"),
+        [
+            ("sh601318", 53.29, 56.779, 0.96, 0.938551224924708),
+            ("sz300750", 291.11, 81.992, 3.61, 3.5504683383744755),
+        ],
+    )
+    def test_混日期快照被拦(self, code, price, bps, pb, ratio) -> None:
+        g = snapshot_pb_guard(price, bps, pb)
+        assert g["checkable"] and not g["pass"], (code, g)
+        assert g["ratio"] == pytest.approx(ratio, rel=1e-12)
+        assert g["rel_err"] > PB_REL_TOL
+
+    def test_bps缺失不可检不冒算(self) -> None:
+        assert not snapshot_pb_guard(11.57, None, 0.48)["checkable"]
+        assert not snapshot_pb_guard(11.57, 0, 0.48)["checkable"]
+
+    def test_price或pb缺失不可检(self) -> None:
+        assert not snapshot_pb_guard(None, 24.129, 0.48)["checkable"]
+        assert not snapshot_pb_guard(11.57, 24.129, None)["checkable"]
