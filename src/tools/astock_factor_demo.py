@@ -81,7 +81,7 @@ def load_prices_akshare(codes: list[str], start: str, end: str) -> pd.DataFrame:
             df = ak.stock_zh_a_hist(symbol=code, period="daily",
                                     start_date=start.replace("-", ""),
                                     end_date=end.replace("-", ""),
-                                    adjust="hfq")  # 后复权，规避除权跳空
+                                    adjust="hfq")  # 前复权，规避除权跳空
         except Exception as e:  # noqa: BLE001
             print(f"    {code} 失败: {e}")
             continue

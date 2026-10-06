@@ -1,4 +1,4 @@
-"""复权价格引擎：把未复权行情转为后复权序列，消除除权跳空污染。
+"""复权价格引擎：把未复权行情转为前复权序列，消除除权跳空污染。
 
 问题
 ----
@@ -9,11 +9,25 @@
 
 公式
 ----
-后复权价= 未复权价 × adj_factor(t) / adj_factor(最新)
+前复权价 = 未复权价 × adj_factor(t) / adj_factor(最新)
 
-Tushare 的 adj_factor 是**前复权因子**（起点≈1），
-后复权需要除以最新值做归一化。归一化系数对所有股票相同量级，
-不改变相对关系，但保证 price 量级与真实价格可比。
+Tushare 的 `adj_factor` 起点≈1、随时间递增（每分红送股一次跳一次），
+是**累乘式**因子，本身不带方向。**除以最新值**做归一化后：
+最新一天 前复权价 ≡ 未复权价，历史价格被压低
+⇒ 得到的是**前复权（qfq）**。
+
+⚠️ **不要叫它「后复权」**（2026-10-06 实测纠正）。
+   后复权（hfq）应保持**基期不动**、末期被抬高，即 `adj/close` 比值
+   **首日=1、末日>1**；本项目实测 `adj/close` 末日恒为 1.000000
+   （茅台 0.793056→1.000000、平安 0.605294→1.000000）⇒ 属前复权。
+   项目内曾有 86 处注释写成「后复权」，已全部纠正。
+
+🔴 **前复权的代价：历史值不可复现。**
+   每新增一次分红送转，**全部历史** 前复权价都会整体重算。
+   ⇒ 同一份代码在不同日期跑出的历史数字不同，
+     runtime/ 下存档的历史结论**不是**可复现的证据，
+     引用时必须连同「数据版本戳」一起引用
+     （见 `research/scripts/data_version.py`）。
 
 量纲与精度
 ----------
@@ -77,7 +91,7 @@ class AdjustedPriceBuilder:
         #    归一化系数会错 1.26 倍 → 复权后累计收益从 33% 虚增到 125%。
         df = df.sort_values(["code", "dnum"])
         self._fac = df.set_index(["code", "dnum"])["adj_factor"]
-        # 每只股票最新因子（排序后 last() 才是真正的最新），用于后复权归一化
+        # 每只股票最新因子（排序后 last() 才是真正的最新），用于前复权归一化
         self._latest = df.groupby("code")["adj_factor"].last()
         self._codes = set(self._fac.index.get_level_values(0).unique())
         self._n_codes = len(self._codes)
@@ -94,14 +108,14 @@ class AdjustedPriceBuilder:
         }
 
     def normalize(self, code: str) -> float:
-        """后复权归一化系数 = 1 / 最新因子。
+        """前复权归一化系数 = 1 / 最新因子。
 
-        后复权价 = 未复权价 × 因子(t) / 因子(最新)
-        归一化后，最新一天的后复权价 == 未复权价。
+        前复权价 = 未复权价 × 因子(t) / 因子(最新)
+        归一化后，最新一天的前复权价 == 未复权价。
         """
         if code not in self._latest.index:
             raise KeyError(
-                f"{code} 无复权因子，无法后复权。\n"
+                f"{code} 无复权因子，无法前复权。\n"
                 f"  可能原因：次新股未上市满一日、或该票已退市。\n"
                 f"  处理：确认 stock_basic_D（退市股名单）里是否含此代码。"
             )
@@ -123,7 +137,7 @@ class AdjustedPriceBuilder:
         prices: pd.Series,
         dates: np.ndarray | None = None,
     ) -> pd.Series:
-        """把某只股票的未复权价格序列转为后复权。
+        """把某只股票的未复权价格序列转为前复权。
 
         参数
         ----
@@ -133,7 +147,7 @@ class AdjustedPriceBuilder:
 
         返回
         ----
-        后复权价格序列，索引与输入一致。
+        前复权价格序列，索引与输入一致。
         因子缺失的日子（前复权因子表起始日之前）保留原值并警告 ——
         这类日子通常是上市首日本就无除权问题。
         """
@@ -210,7 +224,7 @@ def verify_adjustment(
                 "date": date,
                 "close": close,
                 "原日收益%": round(ret * 100, 2),
-                "后复权因子": round(float(fac), 4),
+                "前复权因子": round(float(fac), 4),
                 "复权后收益%": round(
                     (close * float(fac) / (close / (1 + ret)) - 1) * 100, 2
                 ),

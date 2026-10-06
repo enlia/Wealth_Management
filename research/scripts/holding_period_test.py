@@ -202,12 +202,12 @@ def main() -> int:
     info = info[info["code"].isin(codes)]
     long = build_universe(long, cfg, info=info, verbose=False)
     alive = long["code"].unique().tolist()
-{ind}# 🔴 两种价格口径必须分开取（2026-10-06 修）：
-{ind}#    PB/EP 用未复权（bps/eps 是财报披露的原始数字），
-{ind}#    收益/IC/回测用后复权（未复权价除权日有假跳空，
-{ind}#    实测全市场等权口径年化偏差 5~17pp/年）。
-{ind}px_raw, prices = load_factor_prices(alive, start=cfg.start_date,
-{ind}                                end=cfg.end_date)
+    # 🔴 两种价格口径必须分开取（2026-10-06 修）：
+    #    PB/EP 用未复权（bps/eps 是财报披露的原始数字），
+    #    收益/IC/回测用前复权（未复权价除权日有假跳空，
+    #    实测全市场等权口径年化偏差 5~17pp/年）。
+    px_raw, prices = load_factor_prices(alive, start=cfg.start_date,
+                                    end=cfg.end_date)
     panel = pd.read_parquet(
         Path(__file__).resolve().parents[2] / "runtime" / "financial_panel.parquet")
     panel = panel[panel["sym"].isin(alive)]
