@@ -148,8 +148,10 @@ class AdjustedPriceBuilder:
         返回
         ----
         前复权价格序列，索引与输入一致。
-        因子缺失的日子（前复权因子表起始日之前）保留原值并警告 ——
-        这类日子通常是上市首日本就无除权问题。
+        ⚠️ 复权因子缺失的日期（通常在因子表起始日之前）**产出 NaN**
+           —— 不保留原值，也**不发任何告警**，乘法遇到缺因子即 NaN。
+           下游若按「close_adj 非空」过滤，会静默丢行/丢日，
+           查覆盖率异常时要记得这一层。
         """
         if dates is None:
             dates = prices.index.to_numpy()
@@ -163,7 +165,10 @@ class AdjustedPriceBuilder:
     ) -> pd.DataFrame:
         """批量复权。price_df: 索引=日期(int32)，列=本地代码。
 
-        缺因子的列**原样保留**并在返回值里标记（不静默当作已复权）。
+        整列缺因子的股票**原样保留**（不静默当作已复权），缺失代码记在
+        **对象属性 self.last_missing** —— 是属性、不是返回值的组成部分，
+        调用方不读它就无从察觉。列内**部分日期**缺因子时对应日期产出
+        NaN，与 adjust() 一致，同样不告警。
         """
         dates = price_df.index.to_numpy()
         out = pd.DataFrame(index=price_df.index, columns=price_df.columns, dtype=float)
