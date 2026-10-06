@@ -156,6 +156,10 @@ class TestSelectWithBuffer:
 class TestLongOnlyDataDeps:
     """取数列必须覆盖因子声明的依赖（run_long_only.load_long_chunked）。"""
 
+    @pytest.mark.skipif(
+        not DB_PATH.exists(),
+        reason="缺数据产物：data/market.db",
+    )
     def test_取数包含成交量与成交额(self):
         """⚠️ **实测踩过（2026-10-06）**：
         取数硬编码了 OHLC+close_adj，而 `volratio5_60` 依赖 `vol`、
@@ -170,6 +174,10 @@ class TestLongOnlyDataDeps:
         漏了后面的 `cols += [...]`，报了假失败。
         诊断工具的可信度不高于被诊断代码（S12）。
         故这里真的从库里取一小段数据，用真实列名跑因子。
+
+        ⚠️ 依赖真实数据库 `data/market.db`（不进 git）：
+        库不存在即跳过（CI 干净环境、未下载数据的环境），
+        有库环境照常真跑。
         """
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         cols = {r[1] for r in con.execute("PRAGMA table_info(bar_daily)")}
@@ -245,6 +253,10 @@ class TestWarmupWindow:
                 f"预热 {WARMUP_TRADING_DAYS} <最长窗口 {max(windows)}，"
                 f"长窗口因子在年初会缺数据")
 
+    @pytest.mark.skipif(
+        not DB_PATH.exists(),
+        reason="缺数据产物：data/market.db",
+    )
     def test_长窗口因子在首年就有值(self):
         """⚠️ **首年也必须预热**（实测踩过）：
         初版写 `if y > y0: pad_start = ... else: pad_start = ys`，
@@ -273,6 +285,10 @@ class TestWarmupWindow:
             f"pos250({cov250:.1%}) 不应高于 rev5({cov5:.1%})，"
             f"否则说明窗口长度没有生效")
 
+    @pytest.mark.skipif(
+        not DB_PATH.exists(),
+        reason="缺数据产物：data/market.db",
+    )
     def test_因子面板与价格面板索引一致(self):
         """⚠️ **两个面板必须用同一裁剪区间**（实测踩过）：
         因子裁了、price 没裁 → price 488 行 vs factor 244 行，

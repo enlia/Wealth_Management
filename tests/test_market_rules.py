@@ -53,6 +53,9 @@ class TestBoardOf:
             ("sz000001", "main"), ("sz002594", "main"),
             ("sh688205", "star"), ("sh688981", "star"), ("sh689009", "star"),
             ("sz300489", "gem"), ("sz301288", "gem"),
+            # Q5：创业板前缀有 300/301/302 三个，漏 302 会把创业板注册制股票
+            # 判成主板 ±10%，其 20% 涨停被误判成「复权失败」（2026-10-06 实测）
+            ("sz302132", "gem"),
             ("bj920790", "bse"), ("bj899050", "bse"),
         ],
     )
@@ -265,6 +268,11 @@ class TestConstants:
         assert limit_of("sh688205") == 0.20
         assert limit_of("sz300489") == 0.20
         assert limit_of("bj920790") == 0.30
+
+    def test_创业板三个前缀限幅一致(self) -> None:
+        # Q5：302 漏判会让 sz302132 的 20% 涨停被当成主板 10% 超限
+        for c in ("sz300489", "sz301288", "sz302132"):
+            assert limit_of(c) == 0.20, f"{c} 创业板限幅应为 20%"
 
     def test_板块中文名(self) -> None:
         assert board_cn("sh600519") == "主板"

@@ -55,7 +55,7 @@ def _prep(long: pd.DataFrame) -> pd.DataFrame:
     return d.sort_values(["code", "date"], kind="stable").reset_index(drop=True)
 
 
-# 收益类因子统一用**后复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
+# 收益类因子统一用**前复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
 #
 # ⚠️ 为什么必须复权（AGENTS.md 第二节）
 #   未复权价在除权日出现假跳空：实测主板 0.291% 的日收益超过 ±10% 限制，
@@ -69,7 +69,7 @@ PRICE_COLS = {"close": "close_adj", "high": "high_adj", "low": "low_adj"}
 
 
 def _px(d: pd.DataFrame, field: str = "close") -> pd.Series:
-    """取价格序列，优先用后复权列。
+    """取价格序列，优先用前复权列。
 
     长表由 ``load_long(adjusted=True)`` 产出时才有 ``*_adj`` 列。
     若请求复权列但长表里没有，**直接报错** —— 静默退回未复权价
@@ -195,7 +195,10 @@ def hh_hl_score(long: pd.DataFrame, window: int = 20) -> pd.Series:
        用未复权价会把「除权」误读成「高点降低」，趋势结构直接判错。
     """
     d = _prep(long)
-    g = d.groupby("code", sort=False)
+    # ⚠️ 这里原本有一行 `g = d.groupby("code", sort=False)`（`bd64b99` 遗留）：
+    #   建了索引却从未查询 —— 下面 `hi`/`lo` 都是各自 inline 建 groupby，
+    #   `g` 是死变量，CI 的 F841 检查（拦的是**整仓**）会拦住它。
+    #   该行已删；保留这段说明，以免同样的写法再回来。
     hi = _px(d, "high").groupby(d["code"], sort=False).rolling(window).max() \
         .reset_index(level=0, drop=True)
     lo = _px(d, "low").groupby(d["code"], sort=False).rolling(window).min() \
