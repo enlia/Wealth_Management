@@ -42,10 +42,60 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from factor_lab.config import DB_PATH  # noqa: E402
+from factor_lab.config import DB_PATH, YUAN_TO_YI  # noqa: E402
 
 OUT = Path(__file__).resolve().parents[2] / "runtime" / "tushare"
 BACKUP = Path(__file__).resolve().parents[2] / "runtime" / "backup"
+
+# ── 金额单位换算（P19 同类问题的第二个实例）────────────────────
+# ⚠️ 本机 stock_info 用【亿元】，Tushare 财务表用【元】，差 1e8 倍。
+#    实测硬验证（茅台 2026-06-30）：
+#      stock_info.net_assets 2,512.536亿 ÷ shares 12.500815亿股
+#        = 200.98978 元/股 = ts_fina_indicator.bps 200.9898✓
+#      直接相除：9.23e10 / 907.03 = 101,736,220（荒谬但不报错）
+#
+#    规矩：**换算只在数据入口做一次**（本函数），禁止下游各自换算。
+#    入库后所有 ts_ 财务表的金额列统一为【亿元】。
+
+# ⚠️⚠️ **按表配置，绝不用列名关键词猜测** ——
+#   初版用「含revenue/income/assets 等关键词」判定，实测误判率极高：
+#     assets_turn（资产周转率）    含 assets → 被误换算
+#     assets_yoy（资产同比增速）  含 assets → 被误换算
+#     debt_to_assets（资产负债率）含 assets → 被误换算
+#     bps（每股净资产，元/股）  必须 /1e8 → 实际没换
+#   fina_indicator 一张表就误判 5 列。**关键词法在金融字段上不可用。**
+# 不换算的表（键为 TABLES 里的源文件名）
+NO_MONEY_CONVERT = {"fina_indicator_clean", "top10_holders",
+                    "top10_floatholders", "stk_managers", "index_weight"}
+
+# 白名单由 build_money_whitelist.py 从**真实数据**推导并存为 JSON。
+# ⚠️ 绝不手写：初版手写时有 30 个列名是凭记忆写的、实际不存在
+#   （accounts_payable 实际叫 acct_payable…），
+#   而真实存在却漏写的金额列会**静默漏换算**。
+WHITELIST_FILE = OUT / "_money_whitelist.json"
+
+
+def _load_whitelist() -> dict[str, list[str]]:
+    """读白名单。文件缺失时 raise —— 禁止静默用空列表导致「以为换算过了」。"""
+    import json
+    if not WHITELIST_FILE.exists():
+        raise FileNotFoundError(
+            f"金额列白名单不存在：{WHITELIST_FILE}\n"
+            f"  解决：uv run python research/scripts/build_money_whitelist.py"
+        )
+    return json.loads(WHITELIST_FILE.read_text(encoding="utf-8"))
+
+
+def _money_cols_for(src: str, df: pd.DataFrame) -> list[str]:
+    """返回该表需要换算的列名列表。
+
+    ⚠️ **必须显式配置**，不在白名单里的列一律不换算 ——
+    金融字段的命名无法靠关键词可靠推断（见MONEY_COLS 上方注释）。
+    """
+    if src in NO_MONEY_CONVERT:
+        return []
+    allow = set(_load_whitelist().get(src, []))
+    return [c for c in df.columns if c in allow]
 
 # 要并入的表：tushare 文件名 → (本机表名, 日期列, 额外索引列)
 # ⚠️ 财务类多版本表用 _clean 版本（见 clean_tushare_data.py）
@@ -98,32 +148,50 @@ def ts_to_local(ts_code) -> str | None:
     return pre + num
 
 
-def normalize(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
-    """统一类型：ts_code→ 本机格式、日期 → int32 YYYYMMDD。"""
+def normalize(df: pd.DataFrame, date_col: str, src: str) -> tuple[pd.DataFrame,
+                                                                   list[str]]:
+    """统一三件事：ts_code → 本机格式、日期 → int32、**金额 → 亿元**。
+
+    ⚠️ 金额换算是本函数存在的核心原因之一（P19 同类问题）。
+    没有它，因子研究时``ts_income.total_revenue``（元）
+    与 ``stock_info.revenue``（亿元）直接相除会得到 1e8 量级的荒谬值，
+    而且**不报错**。
+    """
     out = df.copy()
+    n_in = len(out)
     if "ts_code" in out.columns:
         out["ts_code"] = out["ts_code"].map(ts_to_local)
-        # 转换失败的（港股/指数/债券等）直接剔除，不静默留 NaN
+        # 转换失败的（港股/指数/债券等）直接剔除
         out = out[out["ts_code"].notna()]
+        n_dropped = n_in - len(out)
+        if n_dropped:
+            # 禁止静默：明确报告剔除了多少
+            print(f"    {src}: 剔除 {n_dropped:,} 行非 A 股代码"
+                  f"（港股/指数/债券等）")
     if date_col in out.columns:
         d = out[date_col]
         if d.dtype == object or str(d.dtype).startswith("datetime"):
             d = pd.to_datetime(d, format="mixed", errors="coerce")
             d = d.dt.strftime("%Y%m%d")
-        out[date_col] = (pd.to_numeric(d, errors="coerce")
-                         .dropna().astype("int64"))
+        # ⚠️ 用 Int64 而非 int64：astype("int64") 遇到 NaN 会静默变 float64，
+        #    导致 JOIN bar_daily（date 是 integer）时类型不匹配、索引失效。
+        out[date_col] = pd.to_numeric(d, errors="coerce").astype("Int64")
         out = out[out[date_col].between(19900101, 20301231)]
-    return out
+    # 金额：元 → 亿元（显式白名单，不猜）
+    money_cols = _money_cols_for(src, out)
+    if money_cols:
+        out[money_cols] = out[money_cols] * YUAN_TO_YI
+    return out, money_cols
 
 
 def merge_one(con: sqlite3.Connection, src: str, dst: str,
               date_col: str, indexes: list[str], dry: bool) -> dict:
-    """并入单张表。"""
+    """并入单张表。金额列在入库前统一换算成【亿元】。"""
     f = OUT / f"{src}.parquet"
     if not f.exists():
         return {"src": src, "dst": dst, "skipped": "文件不存在"}
 
-    df = normalize(pd.read_parquet(f), date_col)
+    df, money_cols = normalize(pd.read_parquet(f), date_col, src)
     n_raw = len(df)
     if n_raw == 0:
         return {"src": src, "dst": dst, "skipped": "清洗后 0 行"}
@@ -147,9 +215,19 @@ def merge_one(con: sqlite3.Connection, src: str, dst: str,
                 con.execute(
                     f"CREATE INDEX IF NOT EXISTS ix_{dst}_{col} "
                     f"ON {dst}({col})")
+        # 记录单位口径 —— 防止下游忘记「已经是亿元了」
+        con.execute(f"CREATE TABLE IF NOT EXISTS {dst}_meta "
+                    f"(k TEXT PRIMARY KEY, v TEXT)")
+        con.execute(f"INSERT OR REPLACE INTO {dst}_meta VALUES (?,?)",
+                    ("金额单位", "亿元（Tushare 原始单位为元，入口已/1e8）"))
+        con.execute(f"INSERT OR REPLACE INTO {dst}_meta VALUES (?,?)",
+                    ("每股指标单位", "元/股（未换算）"))
+        con.execute(f"INSERT OR REPLACE INTO {dst}_meta VALUES (?,?)",
+                    ("换算列数", str(len(money_cols))))
         con.commit()
 
-    return {"src": src, "dst": dst, "rows": n_raw, "raw": n_raw, "existed": existed}
+    return {"src": src, "dst": dst, "rows": n_raw, "existed": existed,
+            "money_cols": len(money_cols)}
 
 
 def main() -> int:
@@ -191,6 +269,7 @@ def main() -> int:
                 print(f"  ○ {src:<24} {r['skipped']}")
             else:
                 print(f"  ✓ {src:<24} → {dst:<22} {r['rows']:>10,} 行"
+                      f"  金额列 {r.get('money_cols', 0)} 个已转亿元"
                       f"  {time.perf_counter() - t0:>5.1f}s")
     finally:
         con.close()

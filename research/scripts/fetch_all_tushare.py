@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -24,125 +23,76 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research" / "scripts"))
 from fetch_tushare import call  # noqa: E402
 from tushare_paging import fetch_paged  # noqa: E402
+from tushare_paths import (  # noqa: E402
+    OUT,
+    a_share_codes,
+    months,
+    report_periods,
+    save,
+    trading_days,
+)
+from tushare_state import Limiter, load_manifest, mark_done  # noqa: E402
 from tushare_tasks import END, INDEXES, START, TASKS  # noqa: E402
 
-from factor_lab.config import DB_PATH, env_get, is_a_share  # noqa: E402
+from factor_lab.config import env_get  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "runtime" / "tushare"
-RATE = 180# 次/分钟，留 10% 余量
+# 各表的业务主键（白名单，**不是「加到唯一为止」**）。
+# ⚠️ 为什么不用「逐个加候选键直到行唯一」：
+#   那个策略天然会**主动丢弃区分字段**来追求唯一。
+#   实测踩过：财务三表 4 个 report_type × 2 个 update_flag = 8 个合法版本，
+#   候选键里没有 report_type/update_flag，全部被压成 1 行。
+#   正确做法是先确定该表的**业务主键**，键用尽仍不唯一时抛错。
+BUSINESS_KEYS: dict[str, list[str]] = {
+    # 财务三表：主体 + 报告期 + 公告日 + 报表类型 + 是否更新公告
+    "income":            ["ts_code", "end_date", "ann_date",
+                          "report_type", "update_flag"],
+    "balancesheet":      ["ts_code", "end_date", "ann_date",
+                          "report_type", "update_flag"],
+    "cashflow":          ["ts_code", "end_date", "ann_date",
+                          "report_type", "update_flag"],
+    "fina_indicator":    ["ts_code", "end_date", "ann_date"],
+    "forecast":          ["ts_code", "ann_date", "end_date"],
+    "express":           ["ts_code", "ann_date", "end_date"],
+    "fina_mainbz":       ["ts_code", "end_date", "ann_date", "type"],
+    "top10_holders":     ["ts_code", "end_date", "holder_name", "ann_date"],
+    "top10_floatholders": ["ts_code", "end_date", "holder_name", "ann_date"],
+    "stk_holdernumber":  ["ts_code", "end_date", "ann_date"],
+    "pledge_stat":       ["ts_code", "end_date"],
+    "share_float":       ["ts_code", "float_date", "ann_date"],
+    # 指数权重：必须带 index_code，否则同日的沪深300/中证500 会被合并
+    "index_weight":      ["index_code", "con_code", "trade_date"],
+    "report_rc":         ["ts_code", "ann_date", "end_date", "org_name"],
+}
 
-
-
-
-def trading_days(token: str) -> list[str]:
-    """取交易日历（缓存到本地，避免重复请求）。"""
-    cache = OUT / "trade_cal.parquet"
-    if cache.exists():
-        df = pd.read_parquet(cache)
-    else:
-        df = call(token, "trade_cal",
-                  {"start_date": START, "end_date": END, "is_open": "1"})
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(cache, index=False)
-    return sorted(df["cal_date"].astype(str).tolist())
-
-
-def report_periods() -> list[str]:
-    """报告期列表：2015Q4 ~ 2026Q2。"""
-    out = []
-    for y in range(2015, 2027):
-        for q, mmdd in ((1, "0331"), (2, "0630"), (3, "0930"), (4, "1231")):
-            if y == 2015 and q != 4:
-                continue
-            if y == 2026 and (q > 2 or (q == 2 and mmdd > "0930")):
-                continue
-            out.append(f"{y}{mmdd}")
-    return out
-
-
-def months() -> list[str]:
-    out = []
-    for y in range(2015, 2027):
-        for m in range(1, 13):
-            if y == 2015 and m < 12:
-                continue
-            if y == 2026 and m > 9:
-                continue
-            out.append(f"{y}{m:02d}")
-    return out
+# 业务主键用尽后仍不唯一时的兜底：只加这些「补充区分列」
+EXTRA_DISAMBIGUATORS = ["f_ann_date", "comp_type", "end_type", "holder_type"]
 
 
-def a_share_codes() -> list[str]:
-    """本机 A 股代码 → Tushare ts_code。"""
-    import sqlite3
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    codes = [r[0] for r in con.execute("SELECT DISTINCT code FROM bar_daily")
-             if is_a_share(r[0])]
-    out = []
-    for c in codes:
-        c = c.lower()
-        mkt, num = c[:2], c[2:]
-        sfx = {"sh": "SH", "sz": "SZ", "bj": "BJ"}[mkt]
-        out.append(f"{num}.{sfx}")
-    return sorted(out)
+def dedup_by_business_key(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    """按业务主键去重；主键用尽仍不唯一时抛错，不静默丢数据。"""
+    keys = [k for k in BUSINESS_KEYS.get(name, []) if k in df.columns]
+    if not keys:
+        # 没有配置主键的表：只去整行重复，不做业务去重
+        return df
 
+    if df.duplicated(subset=keys).any():
+        # 补充区分列（能救几个是几个）
+        for c in EXTRA_DISAMBIGUATORS:
+            if c in df.columns and c not in keys:
+                keys.append(c)
+                if not df.duplicated(subset=keys).any():
+                    break
 
-def save(df: pd.DataFrame, tag: str) -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(OUT / f"{tag}.parquet", index=False)
-
-
-class Limiter:
-    """限频：RATE 次/分钟，遇接口报错自动退避。"""
-
-    def __init__(self, rate: int = RATE) -> None:
-        self.interval = 60.0 / rate
-        self.last = 0.0
-
-    def wait(self) -> None:
-        dt = time.perf_counter() - self.last
-        if dt < self.interval:
-            time.sleep(self.interval - dt)
-        self.last = time.perf_counter()
-
-
-MANIFEST = OUT / "_download_manifest.json"
-
-# Tushare 单页上限。实测：
-#   namechange 首页 10,000（上限 10,000）    index_basic 首页 8,000（实际 8,000 满页）
-#   repurchase/pledge_detail 首页 2,000/1,500
-# ⚠️ **必须翻页**，否则拿到的是首页截断，数据是残缺的。
-#   实测 new_share offset=4000 只剩 340 行 —— 说明 4,340 就是全量。
-PAGE_SIZE = 2000
-
-
-def load_manifest() -> dict:
-    """读下载账本：记录每个任务是否**真正完成**。
-
-    ⚠️ 不能用「文件存在」判断完成 ——
-    中断时 `run_task` 会写 `{tag}_partial.parquet`，
-    若下次跑只判断 `{tag}.parquet` 存在，会把半成品当完成。
-    """
-    if not MANIFEST.exists():
-        return {}
-    try:
-        return json.loads(MANIFEST.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        # 账本损坏必须显式报错，不能静默当成「全部重跑」
+    remain = int(df.duplicated(subset=keys).sum())
+    if remain:
         raise RuntimeError(
-            f"下载账本损坏：{MANIFEST}\n"
-            f"  解决：删除该文件后重跑（会重新下载全部任务）"
-        ) from None
-
-
-def mark_done(name: str, rows: int, minutes: float) -> None:
-    m = load_manifest()
-    m[name] = {"rows": rows, "minutes": round(minutes, 1),
-               "at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST.write_text(json.dumps(m, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
+            f"{name} 按业务主键 {keys} 去重后仍有 {remain:,} 行重复。\n"
+            f"  说明该表还有未识别的版本维度。**禁止静默 drop_duplicates** ——\n"
+            f"  实测踩过：财务三表缺 report_type/update_flag 时，\n"
+            f"  8 个合法报表版本被压成 1 行（见 DATA_SOURCE.md S8）。\n"
+            f"  解决：把缺失的区分列加到 BUSINESS_KEYS['{name}']"
+        )
+    return df.drop_duplicates(subset=keys, keep="last")
 
 
 def run_task(name: str, spec: dict, token: str, lim: Limiter,
@@ -335,30 +285,16 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
         print(f"    去完全重复行 -{n_exact_dup:,}（{n_exact_dup/n_raw*100:.1f}%）")
 
     # 财务类接口同报告期可能多次覆盖，去重后保存。
-    # ⚠️ 去重键必须包含「区分不同实体的字段」：
-    #   index_weight 按 trade_date 去重会丢掉同一天其它指数的成分
-    #   （实测沪深300 与中证500 权重同日返回，不带 index_code 会被合并）。
+    # ⚠️⚠️ 主键必须包含**版本维度**，否则会把合法的多版本报表压成 1 行。
+    #   财务三表的版本维度是 update_flag（0=原始披露 / 1=更新公告）
+    #   与 report_type（1~4 合并/母公司报表），
+    #   实测 4 report_type × 2 update_flag = 8 个合法版本，
+    #   缺键时会被压成 1 行（见 DATA_SOURCE.md S8）。
+    #   index_weight 的区分维度是 index_code ——
+    #   同一 trade_date 有沪深300 与中证500 两套成分，缺 index_code 会合并。
     before = len(df)
     if kind in ("by_period", "by_period_month") and len(df.columns) > 2:
-        # 从最具体到最宽泛，逐个补齐可用键
-        keys: list[str] = []
-        for cand in ("ts_code", "index_code", "con_code", "holder_name",
-                     "period", "end_date", "ann_date", "month", "trade_date"):
-            if cand in df.columns:
-                keys.append(cand)
-        # 候选键按「区分度从高到低」排列，逐个加入直到行唯一。
-        # ⚠️ 不能固定用trade_date —— index_weight 同一天有多个指数的成分，
-        #   少了 index_code 会把沪深300 和中证500 合并掉（实测踩过）。
-        candidates = ["ts_code", "index_code", "con_code", "holder_name",
-                      "ann_date", "period", "end_date", "month", "trade_date"]
-        candidates = [c for c in candidates if c in df.columns]
-        keys: list[str] = []
-        for c in candidates:
-            keys.append(c)
-            if not df.duplicated(subset=keys).any():
-                break
-        if keys:
-            df = df.drop_duplicates(subset=keys, keep="last")
+        df = dedup_by_business_key(df, name)
     save(df, tag)
     el = (time.perf_counter() - t0) / 60
     mark_done(name, len(df), el)
