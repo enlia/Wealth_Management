@@ -182,6 +182,10 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     #
     # ⚠️ 不用 `len(net)/252`：A 股一年实际约 243~245 个交易日，
     #   252 是美股口径，用它会让「年数」偏大约 3.5%，年化被系统性压低。
+    #
+    # ⚠️ 下方 vol/成本的年化仍用固定系数 252（`std×√252`、`cost×252`）：
+    #   这是日频波动/成本放大到年频的惯例系数，与「年数」的自然日口径
+    #   互不相干（年数只管 CAGR），两者并存是有意的，不是漏改。
     years = _year_span(dates)
     cagr = float(nav[-1] ** (1 / years) - 1) if nav[-1] > 0 else -1.0
     vol = float(rr.std() * np.sqrt(252))
