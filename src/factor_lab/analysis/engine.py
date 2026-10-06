@@ -34,18 +34,20 @@ if TYPE_CHECKING:                      # 避免运行期循环导入
     from factor_lab.analysis.long_only import PortfolioSpec
 
 
-# ── 年化折算常量 ────────────────────────────────────────────────
-# ⚠️ **「日频 → 年频」折算只有这一个常量**（2026-10-06 统一）：
-#   波动、年成本、位置索引兜底的年数换算都用它，不再各写各的。
-#   取 252 —— 全项目年化口径的规范真源是 PITFALLS P10 钉死的公式：
-#       gross = spread * (252 / periods[0])
-#   （P10 的事故本体是 `periods[0]=1` 时年化被低估 252 倍，
-#     公式里的 252 即年化折算惯例；全规范与既有报告数字同此口径。）
-#   ⚠️ 若改 243（A股实际年均交易日）属**全项目口径变更**，
-#     需单独立项重刷历史数字的可比性 —— 本次不做。
-#   ⚠️ 年化**收益**不用它：那是自然日口径（`_year_span`，365.25 天/年），
-#      与基准侧共用一个定义。两套口径的用途写在报告的绩效声明里。
-TRADING_DAYS = 252
+# ── 年化换算常量（两种语义，不能混用）──────────────────────────
+# ① 倍数换算：把「每期/每日的比率」**放大**到年频（×N 或 ×√N）。
+#    取 252 —— 规范真源 PITFALLS P10 钉死公式：
+#        gross = spread * (252 / periods[0])
+#    年化波动 ×√SCALING_TRADING_DAYS、年成本/年化毛 ×SCALING_TRADING_DAYS
+#    同此口径。
+SCALING_TRADING_DAYS = 252
+
+# ② 时长换算：把「交易日数」折成**年数**（数据横跨几年）。
+#    取 243 —— A股实测算式：2,611 交易日 ÷ 10.75 历年 = 242.9 ≈ 243
+#    （年均交易日数）。`_year_span` 的位置索引兜底分支用它。
+#    ⚠️ `_year_span` 主路径（有日期对象）是自然日 365.25，与基准侧同一定义；
+#       本常量只兜底「没有日期对象」的输入。
+YEAR_TRADING_DAYS = 243
 
 
 def _year_span(dates) -> float:
@@ -77,11 +79,11 @@ def _year_span(dates) -> float:
     if hasattr(d0, "year"):                      # Timestamp 索引
         days = (d1 - d0).days
     else:                                        # 位置索引，兜底按交易日折算
-        # TRADING_DAYS = 全项目年化惯例（PITFALLS P10 公式
-        #   `gross = spread * (252 / periods[0])` 的 252 口径）。
-        # ⚠️ 这条分支是**兜底**，与主口径（自然日）不同；
+        # YEAR_TRADING_DAYS = 时长换算口径（A股实测算式：
+        #   2,611 交易日 ÷ 10.75 历年 = 242.9 ≈ 243，年均交易日）。
+        # ⚠️ 这条分支是**兜底**，主路径是自然日 365.25；
         #   混用会让同一份收益算出两个年数，正是本函数要消灭的问题。
-        return max(len(dates) / TRADING_DAYS, 1e-9)
+        return max(len(dates) / YEAR_TRADING_DAYS, 1e-9)
     return max(days / 365.25, 1e-9)
 
 
@@ -191,13 +193,14 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     #   同一份收益，两个年化差 0.50pp/年，而「超额」是全部结论的判据。
     #   ⇒ 统一为**自然日**口径（几何年化的标准定义）。
     #
-    # ⚠️ 年数用**自然日**口径（`_year_span` 主分支，365.25），与基准侧同一定义；
-    #   不用 `len(net)/TRADING_DAYS` 折算年数 —— 那是另一套年数口径，
-    #   混用会让同一份收益算出两个年化，「超额」直接偏。
+    # ⚠️ 年数用 `_year_span`：主路径自然日 365.25（与基准侧同一定义），
+    #   位置索引兜底按 YEAR_TRADING_DAYS（时长换算）。
+    #   换别的年数口径会让同一份收益算出两个年化，「超额」直接偏。
     years = _year_span(dates)
     cagr = float(nav[-1] ** (1 / years) - 1) if nav[-1] > 0 else -1.0
-    # ⚠️ 日频 → 年频的折算统一乘 `TRADING_DAYS`（=252，PITFALLS P10 公式口径）。
-    vol = float(rr.std() * np.sqrt(TRADING_DAYS))
+    # ⚠️ 倍数换算：日频比率放大到年频统一用 `SCALING_TRADING_DAYS`
+    #   （=252，PITFALLS P10 公式 `gross = spread * (252 / periods[0])` 口径）。
+    vol = float(rr.std() * np.sqrt(SCALING_TRADING_DAYS))
     # ⚠️ 「夏普」= 年化收益 ÷ 年化波动，**不是标准 Sharpe**
     #   （标准定义是超额收益均值 ÷ 波动）。列名与 `selection_quality.py`
     #   的历史口径保持一致，定义在报告的绩效声明里注明（P14）。
@@ -217,8 +220,8 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
         "夏普": sharpe,
         "最大回撤": dd,
         "平均换手": float(turn[ok].mean()) if ok.any() else 0.0,
-        "平均年成本": float(cost_arr[ok].mean() * TRADING_DAYS) if ok.any() else 0.0,
-        "年化毛收益": float(cagr + cost_arr[ok].mean() * TRADING_DAYS) if ok.any() else cagr,
+        "平均年成本": float(cost_arr[ok].mean() * SCALING_TRADING_DAYS) if ok.any() else 0.0,
+        "年化毛收益": float(cagr + cost_arr[ok].mean() * SCALING_TRADING_DAYS) if ok.any() else cagr,
         "期数": int(T),
     }
 

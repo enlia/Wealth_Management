@@ -39,14 +39,17 @@ class TestPerfDeclaration:
         for key in ("① 年化口径", "② 成本假设", "③ 基准", "④ 多空口径"):
             assert f"{key}：" in text, f"绩效声明缺 P14 要素：{key}"
 
-    def test_年化成本与夏普定义必须写明(self):
-        """三个口径都要落在声明里：365.25（自然日年数）、
-        「年化按 252 交易日惯例（PITFALLS P10 公式口径）」
-        + 改 243 需单独立项的边界说明、以及「非标准夏普」的定性说明。"""
+    def test_年化双口径与夏普定义必须写明(self):
+        """声明里要齐：365.25（自然日年数）、「倍数换算按 252 交易日
+        （PITFALLS P10 公式口径）」、「时长换算按年均 243 交易日
+        （A股实测 2611÷10.75≈242.9）」、双口径并存与改口径需单独立项的
+        边界说明、以及「非标准夏普」的定性说明。"""
         text = perf_declaration(portfolio="p", cost_desc="c", benchmarks="b")
         assert "365.25" in text
-        assert "年化按 252 交易日惯例（PITFALLS P10 公式口径）" in text
-        assert "需单独立项" in text
+        assert "倍数换算按 252 交易日（PITFALLS P10 公式口径）" in text
+        assert "时长换算按年均 243 交易日（A股实测 2611÷10.75≈242.9）" in text
+        assert "两者并存系语义不同" in text
+        assert "需单独立项重刷历史数字可比性" in text
         assert "非标准夏普" in text
 
 

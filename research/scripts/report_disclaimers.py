@@ -7,8 +7,9 @@
 （CODE_TRUST P23：说的和做的不一致，会让读的人按错的口径下结论）。
 
 声明里每一句都对应代码里的一个具体位置：
-  · 年化收益        → `engine._year_span`（自然日 365.25）几何年化
-  · 年化波动/年成本 → `engine.TRADING_DAYS`（252，PITFALLS P10 公式口径）折算
+  · 年化收益        → `engine._year_span`（主路径自然日 365.25）几何年化
+  · 倍数换算        → `engine.SCALING_TRADING_DAYS`（252，PITFALLS P10 公式口径）
+  · 时长换算        → `engine.YEAR_TRADING_DAYS`（243，A股实测 2611÷10.75≈242.9）
   · 「夏普」        → 年化收益 ÷ 年化波动（**非标准夏普**）
   · 成本假设        → `factor_lab.analysis.costs.CostModel`
 
@@ -45,9 +46,11 @@ def perf_declaration(portfolio: str, cost_desc: str, benchmarks: str) -> str:
     return "\n".join([
         "绩效声明（P14 四要素，缺一不可）：",
         "  ① 年化口径：年化收益 = 自然日几何年化（365.25 天/年，"
-        "engine._year_span，策略与基准同一定义）；"
-        "年化按 252 交易日惯例（PITFALLS P10 公式口径）；"
-        "若改 243 属全项目口径变更，需单独立项重刷历史数字可比性，本次不做；"
+        "engine._year_span 主路径，策略与基准同一定义）；"
+        "倍数换算按 252 交易日（PITFALLS P10 公式口径）；"
+        "时长换算按年均 243 交易日（A股实测 2611÷10.75≈242.9）；"
+        "两者并存系语义不同。若改统一约定属全项目口径变更，"
+        "需单独立项重刷历史数字可比性。"
         "「夏普」= 年化收益 ÷ 年化波动，**非标准夏普**"
         "（标准定义是超额均值/波动）。",
         f"  ② 成本假设：{cost_desc}；换手成本按日从收益中扣减进净值。",
