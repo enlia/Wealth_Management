@@ -247,6 +247,61 @@ for c in df.columns:
 
 ---
 
+## S11 日期列存成 string —— 最隐蔽的一类静默失效 🔴 **全库20 张表中招**
+
+**实测**：2026-10-06 扫描全部 parquet，发现 **20 张表、2,250 万行**
+的 `trade_date` / `ann_date` / `end_date` 等日期列存成 **string**。
+
+**根因**：Tushare 返回的日期是 `'20240102'`（字符串），
+`to_parquet` 原样存成 string 列。**没有任何报错。**
+
+**后果** —— 静默失效，不报错：
+```python
+df[df['trade_date'] == 20240102]        # int 比较 → 0 行
+df[df['trade_date'] == '20240102']      # 只有这个写法能匹配
+```
+下游并库、筛选、join 全部拿到空结果，看起来像「那天没数据」。
+
+实测踩过：用 `stk_limit` 算涨跌停约束时，`trade_date == 20240102`
+返回 0 行，**全表11,473,527 行一行的涨跌停价都没用上**。
+
+**修复**：
+1. 落盘入口统一归一（`tushare_paths.normalize_types`，挂在 `save()` 上）
+   —— **换算只在数据入口做一次**，下游各自转是「东拼西凑」
+2. 存量迁移：`research/scripts/migrate_date_types.py`
+   （先备份 → 转换 → **校验行数不变** → 不一致自动回滚）
+
+**⚠️ 必须用 pandas 可空的 `Int32`，不能用 numpy `int32`**：
+`stk_managers.end_date` 有 73,575 个空值（在任高管本就无离任日期，
+是**业务语义**不是数据损坏），numpy int32 存不了 NA，
+整表迁移直接失败被回滚。
+
+**回归防护**：`tests/test_tushare_types.py::TestStockedParquet`
+直接扫真实文件，新下载的表若再退化成 string 立即失败。
+
+---
+
+## S12 「诊断打印」本身会成为假象来源 🔴 **判据级**
+
+**实测**：因子面板每年打印「1 格」，一度被判定为
+「面板损坏、跨年拼接失效」，差点推倒重写取数逻辑。
+实际面板有 2,600 日期 × 5,600 只 = **1,460 万格**，完全正常。
+
+**根因**：`sum(len(x) for x in acc.values())` ——
+`len(DataFrame)` 返回的是**列数**，单因子面板永远打印「1 格」。
+面板是好的，**打印是错的**。
+
+**为什么危险**：诊断工具的可信度**不高于**被诊断代码。
+一个错的打印会引导出「数据有问题」的误判，
+然后在完好数据上做无意义的修复。
+
+**规则**：
+- 所有进度/统计打印，数字必须**明确标注单位与算法**
+- 涉及形状的统计一律用 `.shape`，**禁止用 `len(df)`**
+- 「数据有问题」的结论，必须有**第二条独立路径交叉验证**后才动手
+
+---
+
 ## 相关模块
 
 | 内容 | 位置 |
@@ -261,7 +316,10 @@ for c in df.columns:
 | **数据清洗** | `research/scripts/clean_tushare_data.py` |
 | **并入本机库** | `research/scripts/merge_tushare_tables.py` |
 | **金额列白名单生成** | `research/scripts/build_money_whitelist.py` |
+| **日期类型归一（S11）** | `research/scripts/tushare_paths.normalize_types` |
+| **存量日期类型迁移** | `research/scripts/migrate_date_types.py` |
 | 工具链测试 | `tests/test_tushare_pipeline.py` |
+| 类型归一测试 | `tests/test_tushare_types.py` |
 
 ---
 
