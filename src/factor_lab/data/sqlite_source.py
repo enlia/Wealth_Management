@@ -47,7 +47,7 @@ def load_prices(
     codes: list[str] | None = None,
     start: str | None = None,
     end: str | None = None,
-    field: str = "close",
+    field: str = "close_adj",
     db_path: Path | str = DB_PATH,
 ) -> pd.DataFrame:
     """读出宽表面板：行=date，列=code。
@@ -59,8 +59,21 @@ def load_prices(
     codes : 标的列表，带市场前缀如 'sh600519'。None 表示全部。
     start, end : 'YYYY-MM-DD' 或 'YYYYMMDD'。None 表示不限。
     field : close / open / high / low / amount / vol / close_adj
-        ⚠️ 收益研究必须用 ``close_adj``（后复权）。``close`` 是未复权价，
-        除权日会出现假跳空（实测年化偏差 −2.365pp），见 AGENTS.md 第二节。
+        🔴 **默认已改为 ``close_adj``（2026-10-06）**。
+        原因：本函数 90% 的用途是喂 alphalens算前瞻收益，
+        而未复权价在除权日有假跳空。
+        实测全市场 5,606 只等权口径的年化偏差（未复权 − 后复权）：
+
+            2016 −16.80pp / 2019 −10.80pp / 2025 −6.97pp
+            2021~2026 每年 −5.1 ~ −8.0pp
+
+        **这个量级大于本项目声称的任何因子收益** ——
+        拿未复权价算出来的 IC 是在给「分红除权」定价。
+
+        ⚠️ 需要**未复权** `close` 的只有一种场合：
+           算 PB / PE / EP 时（要与财报披露的 bps/eps 同口径）。
+           那种场景请用 :func:`factor_lab.data.load_factor_prices`
+           显式取两种口径，不要靠改默认值。
 
     内存提示
     --------

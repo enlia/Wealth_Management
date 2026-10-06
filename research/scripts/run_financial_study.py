@@ -35,7 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from factor_lab.analysis.alphalens_adapter import run_tear_sheet, subperiod_ic
 from factor_lab.config import DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR, is_a_share
-from factor_lab.data import all_codes, load_long, load_prices, load_stock_info
+from factor_lab.data import (  # noqa: E402
+    all_codes,
+    load_factor_prices,
+    load_long,
+    load_stock_info,
+)
 from factor_lab.data.universe import build_universe, summarize_universe
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -357,8 +362,20 @@ def main() -> int:
     alive = long["code"].unique().tolist()
 
     print("\n[3/6] 读取价格宽表 …")
-    prices = load_prices(alive, start=cfg.start_date, end=cfg.end_date, field="close")
-    print(f"      {prices.shape}，{time.perf_counter()-t0:.1f}s")
+    # 🔴🔴 **必须同时取两种价格口径**（2026-10-06 实测 BLOCK）
+    #   初版只取 `field="close"`（未复权），一个面板同时充当两个角色：
+    #     · PB = close / bps        → 确实需要**未复权**价（bps 是财报披露的原始数字）
+    #     · alphalens 前瞻收益 / IC → **必须**用后复权价
+    #   ⇒ 收益端被除权缺口污染。实测全市场等权口径年化偏差：
+    #       2016 −16.80pp / 2019 −10.80pp / 2021~2026 每年 −5.1 ~ −8.0pp
+    #   **这个偏差大于本项目声称的任何因子收益**（最高的 ep 也只有 +6.1%）
+    #   ⇒ 修复前跑出的 bp/ep/roe IC 与多空收益全部不可信。
+    px_raw, px_adj = load_factor_prices(alive, start=cfg.start_date,
+                                       end=cfg.end_date)
+    prices_raw = px_raw
+    prices = px_adj          # 收益口径：后复权
+    print(f"      未复权 {px_raw.shape} / 后复权 {px_adj.shape}"
+          f"（索引已校验一致），{time.perf_counter()-t0:.1f}s")
 
     # ── 2. 财务面板 ───────────────────────────────────────────
     print("\n[4/6] 构建财务因子日频面板 …")
@@ -366,6 +383,10 @@ def main() -> int:
     panel = panel[panel["sym"].isin(alive)]
     print(f"      面板 {len(panel):,} 行，{panel['sym'].nunique():,} 只")
 
+    # ⚠️ **交易日轴取后复权面板**（它才是收益口径的时间轴），
+    #   但**PB/EP 的价格必须传未复权面板** —— bps/eps 是财报披露的原始数字，
+    #   与未复权价同口径。若这里传 `prices`（后复权），
+    #   PB 会被复权因子抬高，等于按「今天的股本」算历史 PB。
     trading_days = prices.index
     # 总股本（用于市值中性化）
     # shares 单位 = 亿股（已核验：mktcap / shares 精确等于股价，见
@@ -374,7 +395,7 @@ def main() -> int:
     shares = None
     if "shares" in info.columns:
         shares = info.set_index("code")["shares"]
-    fac = build_financial_factors(panel, trading_days, prices, shares=shares)
+    fac = build_financial_factors(panel, trading_days, prices_raw, shares=shares)
     daily = fac.pop("_daily")
     print(f"      展开为日频 {len(daily):,} 行，去极值: MAD±5")
     ind_map = daily["industry"]
