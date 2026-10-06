@@ -146,6 +146,27 @@ TDX_VIPDOC = Path(env_get("TDX_VIPDOC") or next(
 MARKET_CAP_UNIT = "万元"
 YI_TO_WAN = 1e4                # 亿元 → 万元的乘数
 
+# ── 财务金额单位（Tushare 口径）────────────────────────────────
+# ⚠️ P19 同类问题的第二个实例：**财务表也有两套单位**。
+#
+#   Tushare income/balancesheet/cashflow  →原始单位【元】
+#   本机 stock_info（通达信口径）        → 单位【亿元】
+#
+# 实测硬验证（茅台 sh600519，2026-06-30）：
+#   stock_info.net_assets= 2,512.536 亿元
+#   ÷ shares= 12.500815 亿股 = 200.98978 元/股
+#   ts_fina_indicator.bps                  = 200.9898 元/股   ✓ 一致
+#   → 确认 stock_info 用亿元、Tushare 用元，**差 1e8 倍**
+#
+#   后果：ts_income.total_revenue(9.23e10) ÷ stock_info.revenue(907.03)
+#        = 101,736,220 —— 荒谬但**不报错**。
+#
+# 规矩：换算只在**数据入口**做一次（merge_tushare_tables.normalize），
+# 禁止在各下游脚本里各自换算 —— 同 P19 的结论。
+FINANCIAL_UNIT_TUSHARE = "元"
+FINANCIAL_UNIT_LOCAL = "亿元"
+YUAN_TO_YI = 1e-8# 元 → 亿元的乘数
+
 
 def to_wan(yi_value):
     """亿元 → 万元。
@@ -238,6 +259,10 @@ class ResearchConfig:
     periods: tuple = (1, 5, 10, 20, 60)   # 前瞻收益期（交易日）
     max_loss: float = 0.5            # alphalens 的缺失值填充上限
 
+    # 子区间检验的最小标的数。低于此数时 alphalens 的 5 分位不可靠
+    # （每组不足 6 只），主动跳过并显式标注原因，不静默填 NaN。
+    min_assets_subperiod: int = 30
+
     # A股特有：T+1 制度导致日内动量与隔夜动量方向相反，
     # 文献指出必须跳过最近 1 个月，故动量因子用 20~60 日而非 5~20 日
     skip_recent_days: int = 20
@@ -278,10 +303,21 @@ def _split(code: str) -> tuple[str | None, str]:
 
 
 def market_of(code: str) -> str | None:
-    """判断市场目录。带前缀则直接返回前缀，否则按通达信目录规则推断。"""
+    """判断市场目录。带前缀则直接返回前缀，否则按通达信目录规则推断。
+
+    ⚠️ 92xxxx 必须判bj，**不能**按「9 开头→sh」处理（2026-10-06 review 抓出）。
+       北交所 2023 年起启用 92xxxx 新代码段（920000 等，见上方坑 2），
+       但 `startswith("9")` 会把它归到上交所 —— 后果是
+       `bj920680`（广道退）被判成 `sh920680` → `is_a_share` 返回 False
+       → 从退市股名单里被静默剔除。
+       判别顺序：**先扣掉已知例外段（88 板块/899 指数），再判首位**。
+    """
     c = code.strip().lower()
     if len(c) == 8 and c[:2] in _PREFIXES:
         return c[:2]
+    # 92xxxx 是北交所，与「9 开头=上交所」冲突，必须先判
+    if c.startswith("92"):
+        return "bj"
     if c.startswith(("6", "9", "5", "1", "88")):
         return "sh"
     if c.startswith(("0", "3", "2")):
@@ -292,9 +328,20 @@ def market_of(code: str) -> str | None:
 
 
 def is_index(code: str) -> bool:
+    """指数代码段。
+
+    ⚠️ 北交所指数段是 ``899xxx``（2026-10-06 实测补）——
+       早先只判sh000 / sh950 / sz399，导致 ``bj899050``（北证50）、
+       ``bj899601``（北证专精特新）被当成A 股普通股进入研究股票池。
+       后果实测：这两只无复权因子（close_adj 全为 NULL），
+       在价格面板里造出 100% 缺失列，60 只样本的面板缺失率被拉到 **67%**，
+       因子因 max_loss 溢出而整段失败。
+       注意与北交所**股票**的 8xxxxx / 92xxxxx 段区分：899xxx 才是指数。
+    """
     m, c = _split(code)
     return (m == "sh" and (c.startswith("000") or c.startswith("950"))) or \
-           (m == "sz" and c.startswith("399"))
+           (m == "sz" and c.startswith("399")) or \
+           (m == "bj" and c.startswith("899"))
 
 
 def is_sector(code: str) -> bool:

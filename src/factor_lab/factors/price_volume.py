@@ -55,6 +55,37 @@ def _prep(long: pd.DataFrame) -> pd.DataFrame:
     return d.sort_values(["code", "date"], kind="stable").reset_index(drop=True)
 
 
+# 收益类因子统一用**后复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
+#
+# ⚠️ 为什么必须复权（AGENTS.md 第二节）
+#   未复权价在除权日出现假跳空：实测主板 0.291% 的日收益超过 ±10% 限制，
+#   年化偏差 2.33pp。未复权价算出的动量/反转/波动率全部含这层污染。
+#
+# ⚠️ 为什么**高低价也要复权**（不能只换 close）
+#   hh_hl_score 用 high/low 判「高点是否抬升」。除权日 high 会机械下移，
+#   不复权会把除权误读成「高点降低」——趋势结构因子直接失效。
+#   复权是乘性调整，同一天三个价格位共用一个乘数，故可直接推导。
+PRICE_COLS = {"close": "close_adj", "high": "high_adj", "low": "low_adj"}
+
+
+def _px(d: pd.DataFrame, field: str = "close") -> pd.Series:
+    """取价格序列，优先用后复权列。
+
+    长表由 ``load_long(adjusted=True)`` 产出时才有 ``*_adj`` 列。
+    若请求复权列但长表里没有，**直接报错** —— 静默退回未复权价
+    会让整个研究在有污染的口径上跑完却不报错（P4「静默fallback」）。
+    """
+    col = PRICE_COLS.get(field, field)
+    if col == field:
+        return d[field]
+    if col not in d.columns:
+        raise KeyError(
+            f"长表缺少复权列 {col!r}，无法用复权口径计算。\n"
+            "  解决：调用 load_long(..., adjusted=True)"
+        )
+    return d[col]
+
+
 # ── 动量类 ────────────────────────────────────────────────────
 def momentum(long: pd.DataFrame, window: int = 20, skip: int = 0) -> pd.Series:
     """N 日动量 = close[t] / close[t-N-skip] - 1
@@ -67,8 +98,9 @@ def momentum(long: pd.DataFrame, window: int = 20, skip: int = 0) -> pd.Series:
     示例：window=60, skip=20 → close[t]/close[t-80]-1
     """
     d = _prep(long)
-    base = d.groupby("code", sort=False)["close"].shift(window + skip)
-    v = d["close"] / base - 1.0
+    px = _px(d, "close")
+    base = px.groupby(d["code"], sort=False).shift(window + skip)
+    v = px / base - 1.0
     return _mk(v, d["code"], d["date"], f"mom{window}_skip{skip}")
 
 
@@ -78,8 +110,9 @@ def reversal(long: pd.DataFrame, window: int = 5) -> pd.Series:
     学术上 A 股短期反转效应显著（与美股的动量方向相反）。
     """
     d = _prep(long)
-    base = d.groupby("code", sort=False)["close"].shift(window)
-    v = -(d["close"] / base - 1.0)
+    px = _px(d, "close")
+    base = px.groupby(d["code"], sort=False).shift(window)
+    v = -(px / base - 1.0)
     return _mk(v, d["code"], d["date"], f"rev{window}")
 
 
@@ -87,7 +120,10 @@ def reversal(long: pd.DataFrame, window: int = 5) -> pd.Series:
 def volatility(long: pd.DataFrame, window: int = 60, annualize: bool = True) -> pd.Series:
     """N 日收益率标准差（滚动窗口），默认年化（×√244）。"""
     d = _prep(long)
-    d["ret"] = d.groupby("code", sort=False)["close"].pct_change()
+    px = _px(d, "close")
+    # ⚠️ fill_method=None：close_adj 有 1.6% 的行为空，默认的 ffill 会把
+    #    停牌/缺失日填成前值，再跨空档算单日收益，凭空造出一次涨跌。
+    d["ret"] = px.groupby(d["code"], sort=False).pct_change(fill_method=None)
     v = d.groupby("code", sort=False)["ret"].rolling(window).std(ddof=1) \
          .reset_index(level=0, drop=True)
     if annualize:
@@ -105,7 +141,8 @@ def downside_volatility(long: pd.DataFrame, window: int = 60,
     """
     d = _prep(long)
     mp = window // 3 if min_periods is None else min_periods
-    d["ret"] = d.groupby("code", sort=False)["close"].pct_change()
+    px = _px(d, "close")
+    d["ret"] = px.groupby(d["code"], sort=False).pct_change(fill_method=None)
     d["neg"] = d["ret"].where(d["ret"] < 0, np.nan)
     v = d.groupby("code", sort=False)["neg"].rolling(window, min_periods=mp).std(ddof=1) \
          .reset_index(level=0, drop=True)
@@ -137,10 +174,11 @@ def turnover_proxy(long: pd.DataFrame, window: int = 20) -> pd.Series:
 def price_position(long: pd.DataFrame, window: int = 250) -> pd.Series:
     """价格分位 = (close - min) / (max - min)，滚动 window 日。取值 0~1。"""
     d = _prep(long)
-    g = d.groupby("code", sort=False)["close"]
+    px = _px(d, "close")
+    g = px.groupby(d["code"], sort=False)
     lo = g.rolling(window).min().reset_index(level=0, drop=True)
     hi = g.rolling(window).max().reset_index(level=0, drop=True)
-    v = (d["close"] - lo) / (hi - lo).replace(0, np.nan)
+    v = (px - lo) / (hi - lo).replace(0, np.nan)
     return _mk(v, d["code"], d["date"], f"pos{window}")
 
 
@@ -152,11 +190,16 @@ def hh_hl_score(long: pd.DataFrame, window: int = 20) -> pd.Series:
       · HH：窗口内最高价 > 上一窗口最高价  → +1
       · HL：窗口内最低价 > 上一窗口最低价  → +1
     取值 {-1, 0, 1, 2}，越高趋势越强。
+
+    ⚠️ high/low 必须用**复权**价：除权日 high 会机械下移，
+       用未复权价会把「除权」误读成「高点降低」，趋势结构直接判错。
     """
     d = _prep(long)
     g = d.groupby("code", sort=False)
-    hi = g["high"].rolling(window).max().reset_index(level=0, drop=True)
-    lo = g["low"].rolling(window).min().reset_index(level=0, drop=True)
+    hi = _px(d, "high").groupby(d["code"], sort=False).rolling(window).max() \
+        .reset_index(level=0, drop=True)
+    lo = _px(d, "low").groupby(d["code"], sort=False).rolling(window).min() \
+        .reset_index(level=0, drop=True)
     hi_prev = hi.groupby(d["code"]).shift(window)
     lo_prev = lo.groupby(d["code"]).shift(window)
     valid = hi.notna() & lo.notna() & hi_prev.notna() & lo_prev.notna()
@@ -178,6 +221,28 @@ FACTORY: dict = {
     "pos250": lambda d: price_position(d, 250),
     "hhhl20": lambda d: hh_hl_score(d, 20),
 }
+
+# 离散取值因子必须用**等宽值域分箱**（bins），不能用等频分位（quantiles）。
+#
+# ⚠️ 2026-10-06 实测踩坑（三次才定位到根因）：
+#   hhhl20 取值只有 {0, 1, 2}，分 5 组时：
+#     · quantiles=5      → pd.qcut(x, 5) 在 3 种取值上产生大量 NaN，
+#                          binning 丢弃 90%，MaxLossExceededError(100% exceeded)
+#     · zero_aware=True  → 更糟：它按正/负各切一半，而 hhhl **没有负值**，
+#                          负半区为空 → 负分位全NaN，仍整段失败
+#     · bins=3           → ✅ 按值域等宽切，正常出结果
+#   教训：取值种类 < 分组数时，等频分位在数学上就无解，必须换分箱方式。
+DISCRETE_FACTORS: dict[str, int] = {"hhhl20": 3}   # 因子名 -> 箱数
+
+
+def bins_of(name: str) -> int | None:
+    """该因子应使用的等宽箱数；连续因子返回 None（走等频分位）。
+
+    未知因子直接报错，不静默返回 None——否则会退回等频分位而整段失败。
+    """
+    if name not in FACTORY:
+        raise KeyError(f"未知因子 {name!r}，可用: {sorted(FACTORY)}")
+    return DISCRETE_FACTORS.get(name)
 
 
 def compute_factor(name: str, long: pd.DataFrame) -> pd.Series:
