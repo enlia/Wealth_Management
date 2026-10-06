@@ -92,7 +92,18 @@ def load_long_chunked(codes: list[str], start: str, end: str,
         ys, ye = f"{y}0101", f"{y}1231"
         if ye < start[:8] or ys > end[:8]:
             continue
-        lo = max(ys, start[:8])
+        # ⚠️ **不能用 max(ys, start) 做下界**（实测踩过）：
+        #   `start` 可能是**预热起点**（如 20180102），
+        #   而 `ys` 是本年 1 月 1 日。max() 会把下界夹回本年元旦，
+        #   于是**预热数据一行都读不到**，
+        #   长窗口因子（pos250 / mom120）在年初必然全 NaN。
+        #
+        #   实测：`start=20180102, years=(2018, 2019)`
+        #        → 2019 段 lo = max('20190101','20180102') = '20190101'
+        #        → 预热完全失效（修复 WARMUP 天数后暴露出来）。
+        #
+        #   正确做法：下界直接用 start（它已是更早的预热起点）。
+        lo = start[:8]
         hi = min(ye, end[:8])
         parts = []
         # 分批取代码，避免单条 SQL 的 IN 列表过长
