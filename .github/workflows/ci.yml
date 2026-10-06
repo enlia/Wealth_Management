@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Python 版本必须与本地一致：3.12
       # （<3.13 是依赖链硬约束，peewee 3.17.3 在 3.13 下构建失败）
