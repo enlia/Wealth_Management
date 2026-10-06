@@ -20,6 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..config import SCALING_TRADING_DAYS
+
 
 def _mk(values: pd.Series, codes: pd.Series, dates: pd.Series, name: str) -> pd.Series:
     """构造 alphalens 要求的 MultiIndex Series。
@@ -118,7 +120,7 @@ def reversal(long: pd.DataFrame, window: int = 5) -> pd.Series:
 
 # ── 风险类 ────────────────────────────────────────────────────
 def volatility(long: pd.DataFrame, window: int = 60, annualize: bool = True) -> pd.Series:
-    """N 日收益率标准差（滚动窗口），默认年化（×√244）。"""
+    """N 日收益率标准差（滚动窗口），默认年化（×√SCALING_TRADING_DAYS）。"""
     d = _prep(long)
     px = _px(d, "close")
     # ⚠️ fill_method=None：close_adj 有 1.6% 的行为空，默认的 ffill 会把
@@ -127,7 +129,7 @@ def volatility(long: pd.DataFrame, window: int = 60, annualize: bool = True) -> 
     v = d.groupby("code", sort=False)["ret"].rolling(window).std(ddof=1) \
          .reset_index(level=0, drop=True)
     if annualize:
-        v = v * np.sqrt(244)
+        v = v * np.sqrt(SCALING_TRADING_DAYS)
     return _mk(v, d["code"], d["date"], f"vol{window}")
 
 
@@ -146,7 +148,7 @@ def downside_volatility(long: pd.DataFrame, window: int = 60,
     d["neg"] = d["ret"].where(d["ret"] < 0, np.nan)
     v = d.groupby("code", sort=False)["neg"].rolling(window, min_periods=mp).std(ddof=1) \
          .reset_index(level=0, drop=True)
-    return _mk(v * np.sqrt(244), d["code"], d["date"], f"downvol{window}")
+    return _mk(v * np.sqrt(SCALING_TRADING_DAYS), d["code"], d["date"], f"downvol{window}")
 
 
 # ── 量能类 ────────────────────────────────────────────────────
