@@ -247,7 +247,8 @@ def main() -> int:
     close_raw = close_raw.reindex(columns=list(price.columns))
     if close_raw.shape[1] != price.shape[1]:
         print(f"⚠ 未复权面板列数 {close_raw.shape[1]} ≠ 因子面板 "
-              f"{price.shape[1]}，缺数据的股票将被判不可交易")
+              f"{price.shape[1]}，缺数据的股票默认视为可交易"
+              f"（unlisted_state=tradable）")
     (buy_ok, sell_ok, limit_up_raw, limit_dn_raw,
      up_raw, dn_raw) = build_masks(close_raw, start, end)
 
