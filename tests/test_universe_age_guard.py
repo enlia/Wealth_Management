@@ -58,7 +58,11 @@ class TestListDateFallback:
         days = cal[260:]                     # 上市第 1 天 = 日历第 261 个交易日
         long = _long(code, days)
         ld = [float(pd.Timestamp(days[0]).strftime("%Y%m%d"))] if has_list_date else [None]
-        info = pd.DataFrame({"code": [code], "name": ["北证次新"], "list_date": ld})
+        # 真实 stock_info 里 944/8,728 只缺 list_date（bj920 段整段缺）——
+        # 混合表形态：同表另有可解析上市日的股票
+        info = pd.DataFrame({"code": [code, "sh600519"],
+                             "name": ["北证次新", "贵州茅台"],
+                             "list_date": ld + [20010827.0]})
         first = pd.Series({code: days[0]})
 
         out = build_universe(long, ResearchConfig(), info=info,
@@ -170,6 +174,59 @@ class TestLoadFirstDates:
 
         out = load_first_dates([])
         assert out.empty
+
+
+class TestUniverseNoSilentSkip:
+    """整段上市年限判据不可判定时必须显式报错（原因 + 计数），禁静默跳过。
+
+    还原 bug 版失败形态：info=None / 无 list_date 列 / list_date 全 NaN 时
+    整段过滤**零打印跳过** —— 上市 20 天的 sz301999 照样进池（20 行），
+    本类用例全部因「DID NOT RAISE」FAILED。
+    """
+
+    @staticmethod
+    def _new_stock_long(code: str = "sz301999") -> tuple[pd.DataFrame, pd.DatetimeIndex]:
+        """sz301999 类 20 日新股：表内只有上市后 20 个交易日的行情。"""
+        cal = pd.DatetimeIndex(pd.bdate_range("2024-01-02", periods=300))
+        return _long(code, cal[-20:]), cal
+
+    @pytest.mark.parametrize(
+        ("info", "reason"),
+        [
+            (None, "info 未提供"),
+            (pd.DataFrame({"code": ["sz301999"], "name": ["次新"]}), "无 list_date 列"),
+            (pd.DataFrame({"code": ["sz301999"], "name": ["次新"],
+                           "list_date": [float("nan")]}), "全部不可解析"),
+        ],
+    )
+    def test_判据不可判定时必须报错并给出原因与计数(self, info, reason: str) -> None:
+        long, cal = self._new_stock_long()
+        with pytest.raises(ValueError) as ei:
+            build_universe(long, ResearchConfig(), info=info, verbose=False)
+        msg = str(ei.value)
+        assert "上市年限" in msg, f"错误信息未指明是上市年限过滤：{msg}"
+        assert reason in msg, f"错误信息未给出原因 {reason!r}：{msg}"
+        assert "1 只" in msg and "20 行" in msg, f"错误信息未给出计数：{msg}"
+
+    def test_暴露面_sz301999类20日新股_info缺失不得静默进池(self) -> None:
+        """暴露面样本三：上市 20 天的 sz301999 + info 缺失。
+
+        还原 bug 版失败形态：整段过滤静默跳过 → 20 行**全部进池**且零打印。
+        """
+        long, cal = self._new_stock_long("sz301999")
+        with pytest.raises(ValueError, match="上市年限"):
+            build_universe(long, ResearchConfig(), info=None,
+                           first_dates=pd.Series({"sz301999": cal[-20]}),
+                           verbose=False)
+
+    def test_显式关闭过滤时不报错(self) -> None:
+        """exclude_new=False 是显式取舍出口：不判龄 → 不要求上市日期。"""
+        long, cal = self._new_stock_long()
+        cfg = ResearchConfig(exclude_new=False)
+        out = build_universe(long, cfg, info=None,
+                             first_dates=pd.Series(dtype="datetime64[ns]"),
+                             verbose=False)
+        assert len(out) == 20
 
 
 if __name__ == "__main__":
