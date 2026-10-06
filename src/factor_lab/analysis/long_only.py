@@ -38,88 +38,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from factor_lab.analysis.selection import rank_topk, select_with_buffer
+from factor_lab.analysis.costs import CostModel, breakeven_turnover
+from factor_lab.analysis.selection import (
+    align_masks,
+    rank_topk,
+    select_with_buffer,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-
-
-# ── 交易成本（A 股实际水平）────────────────────────────────────
-@dataclass(frozen=True)
-class CostModel:
-    """单边交易成本。
-
-    ⚠️ **双边**换算：买入 0.025%+ 过户费 0.001%，卖出 0.025% + 印花税 0.05%
-       （印花税 2023-08-28 起减半为 0.05%，此前 0.1%）。
-    手动交易的额外成本（研报/软件/时间）不计入，但**换手率要按实际调仓算**。
-    """
-
-    commission: float = 0.00025     # 佣金 万2.5
-    stamp_duty: float = 0.0005      # 印花税 万5（卖出单边）
-    transfer_fee: float = 0.00001   # 过户费 十万分之一（双向）
-    slippage: float = 0.001         # 冲击成本 0.1%（保守估计）
-
-    @property
-    def buy(self) -> float:
-        return self.commission + self.transfer_fee + self.slippage
-
-    @property
-    def sell(self) -> float:
-        return self.commission + self.transfer_fee + self.slippage + self.stamp_duty
-
-    @property
-    def round_trip(self) -> float:
-        return self.buy + self.sell
-
-    def describe(self) -> str:
-        return (f"买入 {self.buy*1e4:.2f}‱/ 卖出 {self.sell*1e4:.2f}‱ "
-                f"（单边成本 {self.buy*1e4:.2f}‱）")
-
-
-# 盈亏平衡换手率：换手率 × 单边成本必须 < 预期年化超额
-def breakeven_turnover(target_annual_return: float, cost: CostModel) -> float:
-    """给定目标年化收益，能承受的最高**年换手率**（倍数）。
-
-    模型：``年化超额 ≥ 年换手率 × 单边成本``
-
-    ⚠️ **这个数字通常大得没有参考价值**（如目标 20% 时是 158 倍年换手）。
-    原因：单边成本只有 0.126%，理论上极高频也能覆盖成本。
-    但**手动交易受的是换手率本身，不是成本**：
-
-    | 调仓频率 | 年换手 | 现实可行性 |
-    |---|---|---|
-    | 月频 | 3~4 倍 | ✓ 手动可行 |
-    | 季频 | 1~1.5 倍 | ✓ 手动舒适 |
-    | 周频 | 12 倍+ | ✗ 盯盘成本高，且滑点会远超模型值 |
-    | 日频 | 250 倍+ | ✗ 不可能 |
-
-    **所以真正的约束是「手动能执行的换手上限」，约年化 4~6 倍**。
-    对应目标年化超额 20%，需要扣成本后仍正：
-    ``4倍 × 0.126% = 0.5%`` —— 成本占比很低，不是问题。
-
-    真正的风险不在成本，在**因子衰减**和**个股集中度**，见 build_long_only。
-    """
-    if cost.buy <= 0:
-        return float("inf")
-    return target_annual_return / cost.buy
-
-
-# 手动交易的年换手上限（现实约束，非成本约束）
-MANUAL_TURNOVER_CAP = 6.0
-
-
-def manual_turnover_note() -> str:
-    return (f"手动交易年换手上限约 {MANUAL_TURNOVER_CAP:.0f} 倍"
-            f"（月频 3~4 倍 / 季频 1~1.5 倍）。"
-            f"对应年成本 {MANUAL_TURNOVER_CAP * CostModel().buy * 100:.2f}%，"
-            f"不是瓶颈。")
-
-
-# ── A 股特有的交易约束 ────────────────────────────────────────
-# ⚠️ `TradabilityFilter` / `limit_state` 已拆到 `tradable.py`（2026-10-06）。
-#    原因：本文件加注释后达 502 行，超过「≤500 行」硬性门禁。
-#    **这两个符号无生产调用方，且涨跌停约束实际从未生效过** ——
-#    `limit_state` 的 Series 分支必崩、缺数据口径还与 `limit_masks` 相反。
-#    详见 `tradable.py` 的模块 docstring。
 
 
 # ── 持仓构建 ──────────────────────────────────────────────────
@@ -247,27 +173,8 @@ def build_long_only(
     #   本项目的因子（反转）选的正是「刚跌过」的股票，
     #   而跌停股恰恰是「跌得最狠、最卖不掉」的那一批 ⇒ 影响不是随机噪声。
     #
-    #   ⚠️ **必须按下标对齐，不能靠 pandas 自动对齐**：
-    #     `buy_ok.to_numpy()` 的列序若与 `fv_mat` 不同，
-    #     第 i 个因子值会配上第 i 个涨跌停标记 —— 静默错配，不报错。
-    #     故显式 reindex 到 factor_values 的形状。
-    if buy_ok is not None or sell_ok is not None:
-        def _align(mask: pd.DataFrame | None) -> np.ndarray | None:
-            if mask is None:
-                return None
-            if mask.shape != factor_values.shape:
-                raise ValueError(
-                    f"涨跌停面板形状 {mask.shape} 与因子面板 "
-                    f"{factor_values.shape} 不一致，拒绝继续。\n"
-                    f"  静默 reindex 会让「第 i 个因子值」配到"
-                    f"「第 i 个涨跌停标记」，列序不同即错配且不报错。")
-            return mask.to_numpy(dtype=bool)
-
-        buy_m = _align(buy_ok)
-        sell_m = _align(sell_ok)
-    else:
-        buy_m = sell_m = None
-
+    #   对齐与形状校验在 `selection.align_masks`（选股侧职责）。
+    buy_m, sell_m = align_masks(buy_ok, sell_ok, factor_values)
     held_mat = select_with_buffer(top_idx, is_rebal, n_hold,
                                   buy_ok=buy_m, sell_ok=sell_m)
 
@@ -312,8 +219,17 @@ def build_long_only(
     w_mat[:first] = 0.0
     w_mat = w_mat / np.maximum(w_mat.sum(axis=1, keepdims=True), 1e-12)
 
-    return simulate_matrix(factor_values.index, held_mat, w_mat,
-                           fwd, cost, spec)
+    res = simulate_matrix(factor_values.index, held_mat, w_mat,
+                          fwd, cost, spec)
+    # ⚠️ **必须把 held_mat 带出去**（2026-10-06 review BLOCK）：
+    #   「涨跌停约束到底生效了没有」只能通过**检查实际持仓**回答 ——
+    #   持仓里若还有封涨停的票，说明约束没生效。
+    #   而 `held_mat` 原先是 `simulate_matrix` 的局部变量，调用方拿不到
+    #   ⇒ `run_limit_constraint` 里的校验函数 `_verify_constraint_active`
+    #   **接不上**（签名要held_mat，返回值里没有），只能空转。
+    #   ⇒ 无条件附带（非 ok 时也给 None），调用方自行判None。
+    res["held_mat"] = held_mat if res.get("ok") else None
+    return res
 
 
 def rebalance_days(dates, freq: str) -> np.ndarray:
