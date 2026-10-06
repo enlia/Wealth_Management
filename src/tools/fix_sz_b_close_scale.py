@@ -96,7 +96,7 @@ def build_migration_sql(daily_pairs, weekly_pairs) -> str:
         "PRECHECK 污染行数（预期 >0；首跑后复跑应为 0 → 幂等自证）:",
         f"SELECT COUNT(*) FROM bar_daily WHERE ({glob}) AND close IS NOT NULL"
         f" AND vol > 0 AND amount > 0 AND {q};",
-        f"PRECHECK bar_weekly 同口径:",
+        "PRECHECK bar_weekly 同口径:",
         f"SELECT COUNT(*) FROM bar_weekly WHERE ({glob}) AND close IS NOT NULL"
         f" AND vol > 0 AND amount > 0 AND {q};",
         "-- 主修复：污染谓词圈行（复跑 0 命中，天然幂等）",
@@ -230,8 +230,8 @@ def _impact(con, stk_limit: Path) -> None:
 
     sl = pd.read_parquet(stk_limit, columns=["trade_date", "ts_code", "down_limit"])
     sl = sl[(sl.trade_date >= 20230101) & (sl.trade_date <= 20231231)]
-    dn = dict(zip(zip(tushare_to_local_code(sl["ts_code"]), sl["trade_date"]),
-                  sl["down_limit"]))
+    keys = zip(tushare_to_local_code(sl["ts_code"]), sl["trade_date"], strict=True)
+    dn = dict(zip(keys, sl["down_limit"], strict=True))
     print("\n== 封板影响面（2023 跌停判定修复前后；判据=tradability.py:191/210 原文式）==")
     print(f"  {'code':<10}{'格数':>5}{'修复前真封':>9}{'修复后真封':>9}{'翻转':>6}   样例(date/close前/close后/dn/前→后)")
     for code in ("sz200011", "sz200012", "sz200017", "sh600519"):

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 tdx.py —— 本机通达信数据读取工具（纯离线，不联网）
 
@@ -26,11 +25,9 @@ tdx.py —— 本机通达信数据读取工具（纯离线，不联网）
   python tdx.py qfq 600519                  取前复权数据（走新浪，需联网）
   python tdx.py list                        列出全部本地标的
 """
-import os
-import sys
-import glob
-import struct
 import argparse
+import glob
+import os
 
 import numpy as np
 import pandas as pd
