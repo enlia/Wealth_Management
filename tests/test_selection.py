@@ -24,7 +24,18 @@ from factor_lab.analysis.selection import (  # noqa: E402
 from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
 from factor_lab.data import all_codes  # noqa: E402
 from factor_lab.factors.price_volume import FACTORY, compute_factor  # noqa: E402
+from run_financial_study import pick_sample  # noqa: E402
 from run_long_only import WARMUP_TRADING_DAYS, _shift_date, build_panel  # noqa: E402
+
+
+def _sample_codes(n: int = 150) -> list[str]:
+    """按 sh/sz/bj 分层抽样取冒烟样本（P10(4)）。
+
+    ⚠️ 不能用 `codes[:n]`：代码排序下 bj4xxxxx（北交所旧代码段）排最前，
+       截取头部会抽成几乎全是北交所 —— 2021 年前北交所无行情，
+       与面板交集为 0，测试会空转成「看起来通过」（实测踩过）。
+    """
+    return pick_sample([c for c in all_codes() if is_a_share(c)], n)
 
 
 class TestRankTopk:
@@ -246,7 +257,12 @@ class TestWarmupWindow:
         长窗口因子在首年大面积 NaN，
         表现为「因子没数据」，容易被误判成「该股不合格」。
         """
-        codes = [c for c in all_codes() if is_a_share(c)][:150]
+        codes = _sample_codes()
+        assert len({c[:2] for c in codes}) >= 2, (
+            f"分层样本应覆盖 ≥2 个市场，实际 {[c[:2] for c in codes][:10]}")
+        p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
+        assert p["rev5"].notna().sum().sum() > 0, (
+            "样本在 2019 年必须实际有行情行 —— 否则是抽样抽空了，测试在空转")
         p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
         cov250 = float(p["pos250"].notna().mean().mean())
         cov5 = float(p["rev5"].notna().mean().mean())
@@ -271,7 +287,9 @@ class TestWarmupWindow:
         保护（去重/裁剪）必须落在返回值上，不能只落在内部局部变量上，
         否则测试与运行时读到的恰是没被保护的对象。
         """
-        codes = [c for c in all_codes() if is_a_share(c)][:150]
+        codes = _sample_codes()
+        assert len({c[:2] for c in codes}) >= 2, (
+            f"分层样本应覆盖 ≥2 个市场，实际 {[c[:2] for c in codes][:10]}")
         p = build_panel(codes, ["rev5"], "20190101", "20201231")
         px = p["__price__"]
         assert px.index.is_unique, (
@@ -279,6 +297,8 @@ class TestWarmupWindow:
         assert px.index.equals(p["rev5"].index), (
             f"价格面板 {len(px.index)} 行 vs 因子面板 "
             f"{len(p['rev5'].index)} 行，索引必须一致")
+        assert p["rev5"].notna().sum().sum() > 0, (
+            "样本在 2019~2020 年必须实际有行情行 —— 否则测试在空转")
 
 
 if __name__ == "__main__":
