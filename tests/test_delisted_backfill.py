@@ -287,7 +287,10 @@ class TestUniverseListDays:
         from factor_lab.data.universe import build_universe
 
         long = self._long(242)
+        # 用例自带交易日历（与长表日期一致），避免依赖 runtime/ 产物，
+        # 且计龄口径与真实交易日语义一致（bdate_range 即本用例的日历）
         out = build_universe(long, ResearchConfig(), info=self._info(),
+                             trade_cal=pd.DatetimeIndex(sorted(long["date"].unique())),
                              verbose=False)
         assert len(out) == 242, f"老股票被误判为新股，剩 {len(out)}/242 行"
 
@@ -299,7 +302,9 @@ class TestUniverseListDays:
         long = self._long(242)
         # 上市日= 2024-03-01（窗口内第 21 个交易日）
         out = build_universe(long, ResearchConfig(),
-                             info=self._info(list_date=20240301), verbose=False)
+                             info=self._info(list_date=20240301),
+                             trade_cal=pd.DatetimeIndex(sorted(long["date"].unique())),
+                             verbose=False)
         # 满 250 天的行不存在 → 全部淘汰
         assert len(out) == 0, f"次新股未被淘汰，剩 {len(out)} 行"
 
@@ -310,5 +315,7 @@ class TestUniverseListDays:
 
         long = self._long(300)
         out = build_universe(long, ResearchConfig(),
-                             info=self._info(list_date=20240102), verbose=False)
+                             info=self._info(list_date=20240102),
+                             trade_cal=pd.DatetimeIndex(sorted(long["date"].unique())),
+                             verbose=False)
         assert len(out) == 50, f"应保留 300−250=50 行，实际 {len(out)}"

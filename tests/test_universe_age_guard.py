@@ -21,8 +21,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from factor_lab.config import DB_PATH, ResearchConfig
+from factor_lab.config import DB_PATH, OUTPUT_DIR, ResearchConfig
 from factor_lab.data.universe import build_universe
+
+# 权威交易日历的默认产物路径（写入方 research/scripts/tushare_paths.trading_days）
+TRADE_CAL_DEFAULT = OUTPUT_DIR / "tushare" / "trade_cal.parquet"
 
 
 def _long(code: str, days: pd.DatetimeIndex) -> pd.DataFrame:
@@ -66,7 +69,7 @@ class TestListDateFallback:
         first = pd.Series({code: days[0]})
 
         out = build_universe(long, ResearchConfig(), info=info,
-                             first_dates=first, verbose=False)
+                             trade_cal=cal, first_dates=first, verbose=False)
 
         ok = days[250:]                      # 第 251 个交易日起合格
         assert len(out) == len(ok) == 90, \
@@ -93,7 +96,7 @@ class TestListDateFallback:
         first = pd.Series({code: pd.Timestamp("2015-09-14")})
 
         out = build_universe(long, ResearchConfig(), info=info,
-                             first_dates=first, verbose=False)
+                             trade_cal=cal, first_dates=first, verbose=False)
         assert len(out) == 242, f"缺 list_date 的老股被全灭，剩 {len(out)}/242 行"
 
     def test_缺list_date处理必须打印来源与计数(self) -> None:
@@ -122,7 +125,7 @@ class TestListDateFallback:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             build_universe(long, ResearchConfig(), info=info,
-                           first_dates=first, verbose=False)
+                           trade_cal=cal, first_dates=first, verbose=False)
         out_txt = buf.getvalue()
         assert "缺 stock_info.list_date" in out_txt, "退化处理零打印（铁律 4 违规）"
         assert "按表内首日处理" in out_txt, "未声明退化口径（P23 文案要求如实）"
@@ -146,6 +149,7 @@ class TestListDateFallback:
         })
 
         out = build_universe(long, ResearchConfig(), info=info,
+                             trade_cal=cal,
                              first_dates=pd.Series(dtype="datetime64[ns]"),
                              verbose=False)
         assert len(out) == 0, \
@@ -227,6 +231,96 @@ class TestUniverseNoSilentSkip:
                              first_dates=pd.Series(dtype="datetime64[ns]"),
                              verbose=False)
         assert len(out) == 20
+
+
+class TestUniverseCalendarAge:
+    """计龄序号必须取自权威交易日历，不取输入长表的日期并集。
+
+    还原 bug 版（按长表日期并集排序号）失败形态见各用例 docstring。
+    """
+
+    def test_大缺口不压缩交易日历(self) -> None:
+        """暴露面形态（S7b）：单股长停牌缺口，真实计龄 250+ 交易日不得被数成 0。
+
+        长表中间缺 80 个交易日的行情（停牌）；按长表日期并集排序号时
+        「日历被压缩」→ 最大计龄只有 189 → 全灭；按权威日历计龄 →
+        第 251 个交易日起 20 行合格。
+
+        还原 bug 版失败形态：20 行（真实计龄 250~269）被全灭 → 0 行。
+        """
+        cal = pd.DatetimeIndex(pd.bdate_range("2024-01-02", periods=320))
+        code = "sh600519"
+        days = cal[:120].append(cal[200:270])   # 中段缺口 80 交易日
+        long = _long(code, days)
+        info = pd.DataFrame({"code": [code], "name": ["贵州茅台"],
+                             "list_date": [20240102.0]})   # 基准 = 日历第 1 日
+
+        out = build_universe(long, ResearchConfig(), info=info,
+                             trade_cal=cal, first_dates=pd.Series(dtype="datetime64[ns]"),
+                             verbose=False)
+        ok_rows = days[days >= cal[250]]
+        assert len(out) == len(ok_rows) == 20, \
+            f"日历被缺口压缩（真实计龄 250+ 被数小），应 20 行，实际 {len(out)} 行"
+        assert pd.Timestamp(out["date"].min()) == cal[250]
+
+    def test_交易日历未覆盖数据区间必须报错(self) -> None:
+        """尺子守卫（量测先证尺子）：日历盖不住数据区间 → 报错，不小声数错龄。
+
+        还原 bug 版失败形态：无守卫，缺口日历直接参与计龄（不报错、数错龄）。
+        """
+        cal_full = pd.DatetimeIndex(pd.bdate_range("2024-01-02", periods=320))
+        code = "sh600519"
+        long = _long(code, cal_full)
+        info = pd.DataFrame({"code": [code], "name": ["贵州茅台"],
+                             "list_date": [20240102.0]})
+        with pytest.raises(ValueError, match="交易日历未覆盖"):
+            build_universe(long, ResearchConfig(), info=info,
+                           trade_cal=cal_full[:100],
+                           first_dates=pd.Series(dtype="datetime64[ns]"),
+                           verbose=False)
+
+    def test_基准早于日历起点按已满计并打印(self) -> None:
+        """口径显式化：日历起点前上市的按已满计，且打印受影响只数。"""
+        import contextlib
+        import io
+
+        cal = pd.DatetimeIndex(pd.bdate_range("2024-01-02", periods=300))
+        code = "sh600036"
+        long = _long(code, cal)
+        info = pd.DataFrame({"code": [code], "name": ["招商银行"],
+                             "list_date": [20010827.0]})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = build_universe(long, ResearchConfig(), info=info,
+                                 trade_cal=cal,
+                                 first_dates=pd.Series(dtype="datetime64[ns]"),
+                                 verbose=False)
+        assert len(out) == 300
+        assert "早于交易日历起点" in buf.getvalue(), "口径未披露（禁静默处置）"
+
+
+class TestLoadTradeCal:
+    """权威交易日历读取（Tushare trade_cal 口径、is_open=1 的日期）。"""
+
+    def test_缺文件时报错并给生成命令(self, tmp_path) -> None:
+        from factor_lab.data.trade_cal import load_trade_cal
+
+        with pytest.raises(FileNotFoundError, match="trade_cal"):
+            load_trade_cal(tmp_path / "不存在.parquet")
+
+    @pytest.mark.skipif(not TRADE_CAL_DEFAULT.exists(),
+                        reason="缺产物 trade_cal.parquet（runtime/ 不入库），"
+                               "跳过依赖真实产物的读取用例")
+    def test_读权威日历_单调唯一且只取开市日(self) -> None:
+        from factor_lab.data.trade_cal import load_trade_cal
+
+        cal = load_trade_cal()
+        assert isinstance(cal, pd.DatetimeIndex)
+        assert cal.is_monotonic_increasing and cal.is_unique, "日历必须升序去重"
+        assert len(cal) > 2000, f"日历行数异常：{len(cal)}"
+        # 亲测读数（2026-10-13）：2015-12-01 ~ 2026-09-30 共 2,634 个开市日
+        assert pd.Timestamp("2015-01-01") <= cal[0] < pd.Timestamp("2017-01-01")
+        assert cal[-1] >= pd.Timestamp("2025-12-31")
 
 
 if __name__ == "__main__":
