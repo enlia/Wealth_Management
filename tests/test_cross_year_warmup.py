@@ -195,7 +195,8 @@ class TestRankTopkNaN:
             "若这里没有 NaN 股票，说明 rank_topk 行为已变，"
             "请同步检查所有依赖「NaN 会占候选池」的代码与注释")
 
-    def test_build_panel修复后不再年初全NaN(self):
+    @pytest.mark.require_db
+    def test_build_panel修复后不再年初全NaN(self, require_db):
         """端到端：真实数据上，1 月初必须有因子值。
 
         ⚠️ 只断言「1 月初有值」不够 ——

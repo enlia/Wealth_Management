@@ -115,14 +115,16 @@ class TestMoneyWhitelist:
     def test_股数不换算(self) -> None:
         assert NOT_MONEY_PATTERNS.search("total_share")
 
-    def test_白名单文件存在(self) -> None:
+    @pytest.mark.require_runtime
+    def test_白名单文件存在(self, require_runtime_files) -> None:
         """缺失必须 raise —— 静默用空列表会让人以为「已经换算过了」。"""
         from merge_tushare_tables import WHITELIST_FILE
         assert WHITELIST_FILE.exists(), (
             f"白名单不存在：{WHITELIST_FILE}\n"
             f"  解决：uv run python research/scripts/build_money_whitelist.py")
 
-    def test_实际白名单不含比率字段(self) -> None:
+    @pytest.mark.require_runtime
+    def test_实际白名单不含比率字段(self, require_runtime_files) -> None:
         import json
 
         from merge_tushare_tables import WHITELIST_FILE

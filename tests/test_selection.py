@@ -136,7 +136,8 @@ class TestSelectWithBuffer:
 class TestLongOnlyDataDeps:
     """取数列必须覆盖因子声明的依赖（run_long_only.load_long_chunked）。"""
 
-    def test_取数包含成交量与成交额(self):
+    @pytest.mark.require_db
+    def test_取数包含成交量与成交额(self, require_db):
         """⚠️ **实测踩过（2026-10-06）**：
         取数硬编码了 OHLC+close_adj，而 `volratio5_60` 依赖 `vol`、
         `amount20` 依赖 `amount` ——
