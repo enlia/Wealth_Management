@@ -36,10 +36,15 @@ def main() -> None:
     print("=" * 92)
 
     codes = [c for c in all_codes() if is_a_share(c)]
-    long = load_long(codes, start=START, end=END)
+    # 🔴 **必须 adjusted=True**（2026-10-06 review BLOCK-3 修）
+    #   `compute_factor` 内部的 `_px()` 要求长表带 `close_adj` / `high_adj`，
+    #   缺列时 `raise KeyError` —— 11 个价量因子里有 9 个会直接失败，
+    #   只剩 amount20 / volratio5_60 能跑，输出文件**静默缩水到 2 个因子**。
+    #   对照：run_factor_study.py:116 本来就传了 adjusted=True。
+    long = load_long(codes, start=START, end=END, adjusted=True)
     long = long[long.groupby("code")["date"].rank(method="dense") > 250]
     uni = list(long["code"].unique())
-    prices = load_prices(uni, start=START, end=END)
+    prices = load_prices(uni, start=START, end=END, field="close_adj")
     print(f"股票池 {len(uni):,} 只   交易日 {len(prices):,} 天   因子值 {len(long):,} 条\n")
 
     rows = []

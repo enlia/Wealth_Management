@@ -203,7 +203,7 @@ def main() -> int:
     print("=" * 74)
     print("下一步：把新数据并入本机数据库")
     print("=" * 74)
-    print("  1. 用 adj_factor 修正 bar_daily 的 close（后复权）")
+    print("  1. 用 adj_factor 修正 bar_daily 的 close（前复权）")
     print("  2. 用 index_member_all 补全 industry 字段")
     print("  3. 用 stock_basic(D) 扩展股票池，加入退市股")
     print("  4. 跑 audit_data_quality.py 确认偏差 < 0.5pp/年")

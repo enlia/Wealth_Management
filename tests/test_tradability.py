@@ -112,7 +112,7 @@ class TestLimitMasks:
         with pytest.raises(ValueError, match="覆盖率异常"):
             limit_masks(close, bad, bad)
 
-    def test_传后复权价会被检出(self):
+    def test_传前复权价会被检出(self):
         """review 实测：传close_adj 时封涨停率从 0.79% 稀释到 0.25%，
         不报任何错。这里用「close 数值整体偏移」模拟复权因子。"""
         close, up, dn = self._panel()
