@@ -264,8 +264,15 @@ def build_long_only(
     held_mat = select_with_buffer(top_idx, is_rebal, n_hold)
 
     inv = np.where(vol_mat > 0, 1.0 / vol_mat, np.nan)
-    picked_inv = np.take_along_axis(inv, held_mat, axis=1)
-    bad = ~np.isfinite(picked_inv) | (picked_inv <= 0)
+    # ⚠️ **必须先把 -1 哨兵屏蔽掉**，不能用 clip(下界, 0) 代替：
+    #   `np.take_along_axis` 用的是**负索引语义** ——
+    #   held_mat 里的 -1 会取到**最后一列**（某只真实存在的股票），
+    #   而不是「无持仓」。
+    #   实测踩过：把 0 当哨兵同样错，列索引 0 是真实股票（如 sh600000）。
+    #   所以 sentinel 必须是 -1，且必须**在 take 之前**显式置 NaN。
+    held_safe = np.where(held_mat < 0, 0, held_mat)
+    picked_inv = np.take_along_axis(inv, held_safe, axis=1)
+    bad = (held_mat < 0) | ~np.isfinite(picked_inv) | (picked_inv <= 0)
     w_mat = np.where(bad, np.nan, picked_inv)
     allnan = ~np.isfinite(w_mat).any(axis=1)
     n_valid = np.isfinite(w_mat).sum(axis=1)
@@ -331,6 +338,28 @@ def _carry_forward(mat: np.ndarray, is_rebal: np.ndarray) -> np.ndarray:
     return out
 
 
+def _year_span(dates) -> float:
+    """区间年数（自然日口径）。
+
+    ⚠️ **整个项目只有一个年化定义**，策略与基准共用。
+       初版策略用自然日、基准用 `len/252`，同一份收益算出两个年化，
+       「超额」直接偏0.5pp/年 —— 而超额是所有结论的判据。
+
+    ⚠️ 退化保护：区间不足 1 天时 `days=0` 会除零。
+       极短区间（< 20 交易日）的年化本身失真（review 实测：
+       20 个交易日 +8% 年化被报成 +163%），故设最小天数下限并由调用方
+       对短窗口另作判断，不让单个异常值污染汇总。
+    """
+    if len(dates) < 2:
+        return 1e-9
+    d0, d1 = dates[0], dates[-1]
+    if hasattr(d0, "year"):                      # Timestamp 索引
+        days = (d1 - d0).days
+    else:                                        # 位置索引，兜底按交易日折算
+        return max(len(dates) / 243.0, 1e-9)
+    return max(days / 365.25, 1e-9)
+
+
 def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
                     cost: CostModel, spec: PortfolioSpec) -> dict:
     """矩阵版回测：全程 numpy，不碰 pandas 索引。
@@ -347,11 +376,18 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     ok = pos >= 0
 
     # 组合每日收益 = Σ w[i,t] × r[t, held[i,t]]
+    # ⚠️ **必须屏蔽 held_mat 里的 -1 哨兵**（无持仓槽位）：
+    #   numpy 用**负索引语义**，-1 会取到**最后一列** = 某只真实股票。
+    #   它的权重恰好是 0（权重构造时把哨兵置 NaN→0），
+    #   所以乘积为 0 不会污染收益 —— 但下面 W 的散射赋值
+    #   `W[rows, held_mat] = w_mat` 会往「最后一列」写权重，
+    #   凭空建仓。必须一并屏蔽。
+    held_safe = np.where(held_mat < 0, 0, held_mat)
     # ⚠️ 索引顺序：`held_mat[ok]` 是 (T_ok, n_hold)，`pos[ok]` 是 (T_ok,)，
     #    numpy 广播时**行索引必须先取 held 再取 pos**，写反会形状不匹配。
     gross = np.zeros(T)
     if ok.any():
-        rr = r_mat[pos[ok][:, None], held_mat[ok]]   # (T_ok, n_hold)
+        rr = r_mat[pos[ok][:, None], held_safe[ok]]   # (T_ok, n_hold)
         gross[ok] = np.nansum(w_mat[ok] * rr, axis=1)
 
     # 换手 = |w_t - w_{t-1}| 在**全股票空间**上的 L1 差
@@ -362,7 +398,9 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     if len(rows_ok):
         # ⚠️ 需要把行索引扩展成二维 (T_ok, 1)，
         #    否则 (T_ok,) 与 (T_ok, n_hold) 广播失败。
-        W[rows_ok[:, None], held_mat[rows_ok]] = w_mat[rows_ok]
+        # ⚠️ 用 held_safe（-1→0）：哨兵槽位权重为 0，
+        #    写进第 0 列也是 0，不会凭空建仓。
+        W[rows_ok[:, None], held_safe[rows_ok]] = w_mat[rows_ok]
     dW = np.abs(np.diff(W, axis=0, prepend=W[:1]))
     turn = dW.sum(axis=1)
 
@@ -374,8 +412,18 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
         return {"ok": False, "reason": "净值序列异常"}
 
     rr = pd.Series(net).replace([np.inf, -np.inf], np.nan).dropna()
-    years = max((dates[-1] - dates[0]).days / 365.25, 1e-9)         if hasattr(dates[0], "year") else max(len(net) / 252, 1e-9)
-    cagr = float(nav[-1] ** (1 / years) - 1)
+
+    # ⚠️ **年化口径必须与基准侧一致**，否则「超额 = 策略 − 基准」是错的。
+    #   实测踩过（review 2026-10-06发现）：
+    #     策略侧用**自然日**：364 天跨度 / 365.25 = 0.9966 年
+    #     基准侧用**交易日**：261 个交易日 / 252 = 1.0357 年
+    #   同一份收益，两个年化差 0.50pp/年，而「超额」是全部结论的判据。
+    #   ⇒ 统一为**自然日**口径（几何年化的标准定义）。
+    #
+    # ⚠️ 不用 `len(net)/252`：A 股一年实际约 243~245 个交易日，
+    #   252 是美股口径，用它会让「年数」偏大约 3.5%，年化被系统性压低。
+    years = _year_span(dates)
+    cagr = float(nav[-1] ** (1 / years) - 1) if nav[-1] > 0 else -1.0
     vol = float(rr.std() * np.sqrt(252))
     sharpe = float(cagr / vol) if vol > 0 else np.nan
     nav_s = pd.Series(nav, index=dates, dtype=float)

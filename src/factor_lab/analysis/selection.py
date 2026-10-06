@@ -82,7 +82,21 @@ def select_with_buffer(top_idx: np.ndarray, is_rebal: np.ndarray,
     prev = np.empty(0, dtype=top_idx.dtype)
     for t in range(T):
         if not is_rebal[t]:
-            out[t] = prev
+            # ⚠️ **prev 可能比 n_hold 短**（首个调仓日之前是空的、
+            #   或候选池当天全部不可用）。直接赋值会
+            #   `ValueError: could not broadcast (0,) into (30,)`。
+            #   实测生产路径侥幸不触发，只因 `rebalance_days` 的
+            #   `change = np.ones(...)` 恰好让首日恒为调仓日 ——
+            #   任何非月初起始的切片都会炸。
+            #
+            #   ⚠️ **不能用 0 补齐**：列索引 0 是**真实存在的股票**，
+            #   填 0 等于「持有它」。这里只补 -1 作为「无持仓」哨兵，
+            #   权重矩阵会把它压成 0（见 long_only 的权重构造）。
+            if len(prev) < n_hold:
+                pad = np.full(n_hold - len(prev), -1, dtype=top_idx.dtype)
+                out[t] = np.concatenate([prev, pad])
+            else:
+                out[t] = prev
             continue
         pool = top_idx[t]
         # ⚠️ 不用「因子值是否有限」过滤 —— rank_topk 已把 NaN 排到末尾，

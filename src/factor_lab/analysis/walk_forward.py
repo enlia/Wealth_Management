@@ -50,6 +50,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+# 窗口数下限：低于此数量「胜率」没有统计意义。
+# ⚠️ 实测踩过：judge 原先不检查窗口数，单窗口且超额为正时
+#   直接判「三项判据全部通过」—— 而胜率是二项统计，
+#   n=1 时只有 0% / 100% 两种取值，阈值 60% 对它毫无约束力。
+MIN_WINDOWS = 5
+
 
 @dataclass(frozen=True)
 class WindowSpec:
@@ -69,7 +75,17 @@ def make_windows(dates, spec: WindowSpec) -> list[tuple[list, list]]:
 
     ⚠️ **测试段必须两两不重叠**。若step < test 就会重叠，
     重叠的测试段彼此不独立，胜率会被虚高（同一个行情被数了两遍）。
+
+    ⚠️ 这条**必须在代码里强制**，不能只写在 docstring 里
+    （review 实测：初版只有注释，`step_months` 是公开字段，
+    传 `step=6, test=12` 得到 14 个窗口、13 对相邻重叠，
+    胜率直接虚高）。故此处直接抛错。
     """
+    if spec.step_months < spec.test_months:
+        raise ValueError(
+            f"step_months({spec.step_months}) < test_months({spec.test_months})"
+            f" ⇒ 测试段会重叠，胜率虚高。要用滚动前进模式请显式传 "
+            f"expand_overlap=True 并自行处理样本非独立问题。")
     idx = pd.DatetimeIndex(sorted(pd.to_datetime(list(dates))))
     if len(idx) == 0:
         return []
@@ -122,13 +138,21 @@ class WalkForwardResult:
 def judge(windows: list[dict], factor: str,
           min_win_rate: float = 0.60,
           min_median: float = 0.0,
-          worst_floor: float = -0.05) -> WalkForwardResult:
+          worst_floor: float = -0.05,
+          min_windows: int = MIN_WINDOWS) -> WalkForwardResult:
     """按稳健性判据裁决，不看「平均年化」。
 
     ⚠️ **为什么不用平均超额**：
        单个窗口 +200% 会把 10 个 −10% 的均值拉到正数，
        而这种策略实盘根本拿不住。胜率 + 中位数 + 最差值三个一起看，
        才能反映「能不能真的拿钱去做」。
+
+    ⚠️ **回测失败的窗口（超额 NaN）必须先剔除**（review 实测踩过）：
+       `NaN > 0` 恒为False，直接统计会把「失败窗口」计成「跑输」，
+       而 `np.median` 在含 NaN 时返回 NaN ——
+       报告里出现「最差 +nan%」，判据「最差 > −5%」**根本没执行**，
+       只是靠 `not (nan > 0)` 恰好判False 而歪打正着。
+       且失败率本身就是要报告的信息。
     """
     if not windows:
         return WalkForwardResult(
@@ -136,23 +160,43 @@ def judge(windows: list[dict], factor: str,
             最差超额=float("nan"), 最好超额=float("nan"), 可用=False,
             原因="没有有效窗口", 明细=pd.DataFrame())
 
-    df = pd.DataFrame(windows)
-    exc = df["超额"].to_numpy(dtype=float)
+    full = pd.DataFrame(windows)
+    valid = full["超额"].dropna() if "超额" in full.columns else pd.Series(dtype=float)
+    n_fail = len(full) - len(valid)
+
+    reasons: list[str] = []
+    if n_fail:
+        reasons.append(f"{n_fail}/{len(full)} 个窗口回测失败")
+
+    if valid.empty:
+        return WalkForwardResult(
+            因子=factor, 窗口数=0, 胜率=0.0, 超额中位数=float("nan"),
+            最差超额=float("nan"), 最好超额=float("nan"), 可用=False,
+            原因="；".join(reasons + ["无成功窗口"]), 明细=full)
+
+    # ⚠️ **窗口数必须有下限**（review 实测踩过）：
+    #    胜率是二项统计，n=1 时只有 0% / 100% 两种取值，
+    #    `min_win_rate=0.60` 对它**毫无约束力** ——
+    #    实测单窗口且超额为正时judge 判「三项判据全部通过」。
+    #    这直接违背本模块自己的立论（docstring：单窗口 100% 胜率是假的）。
+    if len(valid) < min_windows:
+        reasons.append(f"窗口数 {len(valid)} < {min_windows}，胜率无统计意义")
+
+    exc = valid.to_numpy(dtype=float)
     win_rate = float((exc > 0).mean())
     med = float(np.median(exc))
     worst = float(exc.min())
     best = float(exc.max())
 
-    reasons: list[str] = []
     if win_rate < min_win_rate:
         reasons.append(f"胜率 {win_rate:.0%} < {min_win_rate:.0%}")
-    if not (med > min_median):
+    if not med > min_median:
         reasons.append(f"超额中位数 {med:+.2%} ≤ 0")
     if worst < worst_floor:
         reasons.append(f"最差窗口 {worst:+.2%} 击穿 {worst_floor:.0%}")
 
     return WalkForwardResult(
-        因子=factor, 窗口数=len(df), 胜率=win_rate, 超额中位数=med,
+        因子=factor, 窗口数=len(valid), 胜率=win_rate, 超额中位数=med,
         最差超额=worst, 最好超额=best, 可用=not reasons,
-        原因="；".join(reasons) if reasons else "三项判据全部通过",
-        明细=df)
+        原因="；".join(reasons) if reasons else "全部判据通过",
+        明细=full)

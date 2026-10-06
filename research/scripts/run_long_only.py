@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT / "research" / "scripts"))
 from factor_lab.analysis.long_only import (  # noqa: E402
     CostModel,
     PortfolioSpec,
+    _year_span,
     breakeven_turnover,
     build_long_only,
     holdout_split,
@@ -178,8 +179,12 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         #   len(df) 返回的是**列数**，单因子面板永远打印「1 格」。
         #   实测踩过：面板实际有 2,600 日期 × 5,600 只 = 1,460 万格，
         #   打印却是「1 格」，一度被误判为「面板损坏、跨年拼接失效」。
-        #   必须用 shape 显式相乘。
-        n_cells = sum(x.shape[0] * x.shape[1] for x in acc.values())
+        #
+        # ⚠️ 也不能写 `x.shape` —— acc[f] 是**逐年 append 的列表**，
+        #   元素是 DataFrame，列表本身没有 .shape（实测 AttributeError）。
+        #   必须逐元素累加 shape 的乘积。
+        n_cells = sum(f.shape[0] * f.shape[1]
+                      for parts in acc.values() for f in parts)
         print(f"    {y}: 原始 {n_rows:>11,} 行，因子面板 {n_cells:>12,} 格")
 
     out = {}
@@ -400,13 +405,25 @@ def main() -> int:
 
 
 def _bench_stats(rets: pd.Series) -> float:
-    """等权基准的年化收益。"""
+    """等权基准的年化收益。
+
+    ⚠️ **必须用自然日口径**（`_year_span`），与策略侧完全一致。
+       初版这里用 `len(r)/252`，而策略侧用 `(日期差)/365.25`，
+       同一份收益两个年化，基准被低估约 0.5pp/年。
+       而「超额 = 策略 − 基准」是所有结论的判据 ——
+       口径不一致会让**所有超额都偏悲观**。
+
+    ⚠️ 252 是美股口径。A 股一年实际约 243~245 个交易日，
+       用 252 会让年数偏大约 3.5%。
+    """
     r = rets.dropna()
     if len(r) < 2:
         return float("nan")
     nav = float((1 + r).prod())
-    years = max(len(r) / 252, 1e-9)
-    return (nav ** (1 / years) - 1) if nav > 0 else -1.0
+    if nav <= 0:
+        return -1.0
+    years = _year_span(r.index)
+    return nav ** (1 / years) - 1
 
 
 def _cross_z(df: pd.DataFrame) -> pd.DataFrame:
