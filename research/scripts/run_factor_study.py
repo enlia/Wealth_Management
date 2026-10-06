@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import time
 import warnings
@@ -25,7 +26,7 @@ from factor_lab.analysis.alphalens_adapter import run_tear_sheet, subperiod_ic
 from factor_lab.config import DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR, is_a_share
 from factor_lab.data import all_codes, load_long, load_prices, load_stock_info
 from factor_lab.data.universe import build_universe, summarize_universe
-from factor_lab.factors.price_volume import FACTORY, compute_factor
+from factor_lab.factors.price_volume import FACTORY, bins_of, compute_factor
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 pd.set_option("display.width", 200)
@@ -41,7 +42,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start", default=None)
     p.add_argument("--end", default=None)
     p.add_argument("--out", default=None, help="结果 CSV 输出目录")
+    p.add_argument("--skip-audit", action="store_true",
+                   help="跳过数据审计前置检查（仅调试用，结论不可引用）")
     return p.parse_args()
+
+
+def run_precheck(skip: bool) -> None:
+    """因子研究的前置关卡：数据审计必须通过（AGENTS.md 硬约束）。
+
+    为什么放在这里而不是靠人工记得跑：
+    「年化偏差 < 0.5pp」是硬红线，但审计脚本是手动运行的
+    （CI 上没有 market.db，见 ENGINEERING.md 第五节）。
+    靠自觉的前置检查等于没有检查—— 本函数把它变成**同一次运行内**的强制步骤。
+    """
+    if skip:
+        print("⚠️ 已跳过数据审计（--skip-audit）：本次结果**不可作为收益结论引用**")
+        return
+    print("→ 跑数据质量审计（close_adj 口径）…")
+    r = subprocess.run(
+        [sys.executable,
+         str(Path(__file__).parent / "audit_data_quality.py"),
+         "--all", "--field", "close_adj"],
+        capture_output=True, text=True,
+    )
+    for ln in r.stdout.split("\n"):
+        if "超限率" in ln or "允许做收益结论" in ln or "禁止收益结论" in ln:
+            print("   ", ln.strip())
+    if r.returncode != 0:
+        raise SystemExit(
+            "\n✗ 数据审计未通过（规则内超限率 ≥ 0.5%），拒绝做收益研究。\n"
+            "  先修数据：uv run python research/scripts/merge_tushare_into_db.py"
+        )
+    print("   ✓ 数据审计通过")
 
 
 def main() -> int:
@@ -53,6 +85,7 @@ def main() -> int:
         cfg = type(cfg)(**{**cfg.__dict__, "end_date": args.end})
 
     full = args.all or args.n == 0
+    run_precheck(args.skip_audit)
     print("=" * 74)
     print("动量 / 反转 / 波动率 因子有效性检验")
     print("=" * 74)
@@ -67,8 +100,17 @@ def main() -> int:
     if not full:
         codes = codes[: args.n]
     print(f"\n[1/5] 读取 {len(codes):,} 只标的长表 …")
-    long = load_long(codes, start=cfg.start_date, end=cfg.end_date)
+    long = load_long(codes, start=cfg.start_date, end=cfg.end_date, adjusted=True)
     print(f"      {len(long):,} 行，耗时 {time.perf_counter()-t0:.1f}s")
+    # ⚠️ adjusted=True 是硬要求：未复权价含除权假跳空（年化偏差 2.33pp）。
+    #    这里显式断言，不靠「记得传参」——P4「静默fallback」的同类。
+    if "close_adj" not in long.columns:
+        raise RuntimeError(
+            "长表缺少 close_adj 列，拒绝在未复权口径上做收益研究。\n"
+            "  解决：确认 bar_daily 已有 close_adj 且调用 load_long(adjusted=True)"
+        )
+    n_adj = int(long["close_adj"].notna().sum())
+    print(f"      后复权覆盖 {n_adj:,} / {len(long):,} = {n_adj/len(long)*100:.3f}%")
 
     info = load_stock_info()
     info = info[info["code"].isin(codes)]
@@ -80,9 +122,17 @@ def main() -> int:
     alive = long["code"].unique().tolist()
 
     # ── 3. 价格面板 ─────────────────────────────────────────
-    print("\n[3/5] 读取价格宽表（alphalens 输入）…")
+    print("\n[3/5] 读取价格宽表（alphalens 输入，后复权）…")
     t0 = time.perf_counter()
-    prices = load_prices(alive, start=cfg.start_date, end=cfg.end_date, field="close")
+    # ⚠️ 必须是 close_adj。alphalens 用 prices.pct_change() 算前瞻收益，
+    #    未复权价会把除权跳空当成真实涨跌，直接污染 IC 与分组收益。
+    prices = load_prices(alive, start=cfg.start_date, end=cfg.end_date,
+                         field="close_adj")
+    if prices.empty:
+        raise RuntimeError(
+            "close_adj 面板为空，拒绝继续（并库未执行？）。\n"
+            "  解决：uv run python research/scripts/merge_tushare_into_db.py"
+        )
     mem = prices.memory_usage(deep=True).sum() / 1024 ** 2
     print(f"      形状 {prices.shape}，内存 {mem:.0f} MB，耗时 {time.perf_counter()-t0:.1f}s")
 
@@ -105,7 +155,8 @@ def main() -> int:
             if n_valid < 1000:
                 print("  ✗ 有效值过少，跳过")
                 continue
-            r = run_tear_sheet(factor, prices, cfg, DEFAULT_COST, factor_name=name)
+            r = run_tear_sheet(factor, prices, cfg, DEFAULT_COST, factor_name=name,
+                               bins=bins_of(name))
             print(f"  耗时 {time.perf_counter()-t0:.1f}s")
             print("  " + r.summary().replace("\n", "\n  "))
             results.append(r)
@@ -121,8 +172,10 @@ def main() -> int:
             continue
         print(f"\n  ── {name}")
         factor = compute_factor(name, long)
-        sub = subperiod_ic(factor, prices, cfg, DEFAULT_COST, name)
-        print("    " + sub.to_string(index=False).replace("\n", "\n    "))
+        sub = subperiod_ic(factor, prices, cfg, DEFAULT_COST, name,
+                           bins=bins_of(name))
+        with pd.option_context("display.width", 250, "display.max_columns", 20):
+            print("    " + sub.to_string(index=False).replace("\n", "\n    "))
         sub.insert(0, "因子", name)
         sub_tables.append(sub)
 
