@@ -62,6 +62,16 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | `.github/standards/ENGINEERING.md` | **工程规范全文，最高优先级** | —  |
 | `.github/standards/PITFALLS.md`    | 金融与数据踩坑（20 条，6 条结论反转） | —  |
 | `.github/standards/TOOLING.md`     | 工具链踩坑（lint / git / CI / 依赖）  | —  |
+| `.github/standards/DATA_QUALITY.md` | **判据设计踩坑（Q1~Q12）** | 321 |
+| `.github/standards/DATA_SOURCE.md`  | **外部数据源 API 踩坑（S1~S7）** | 168 |
+
+**三类踩坑的排查手法不同，别混用**：
+
+| 类别 | 怎么看 |
+|---|---|
+| `ENGINEERING` | 读代码，看结构与约束 |
+| `DATA_QUALITY` | **找反例** —— 怀疑判据本身错了 |
+| `DATA_SOURCE` | **实测接口** —— 文档说的可能和实际不一样 |
 
 ---
 
