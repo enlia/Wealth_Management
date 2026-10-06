@@ -76,7 +76,14 @@ class TearSheetResult:
         for q, v in self.quantile_returns[_col(self.periods[0])].items():
             L.append(f"    Q{q}  {v*100:+7.3f}%")
         L.append("-" * 64)
-        L.append(f"多空组合（Q{self.quantiles} − Q1）年化毛收益: {self.gross_spread*100:+.2f}%")
+        # ⚠️ 标签必须用**实际参与计算的两个分位**，不能用 self.quantiles。
+        #   bins 模式下标签可能跳号（实测 [1, 3]），此时 self.quantiles=3 是
+        #   「成本乘数」，而 spread 实为 Q3 − Q1；早期版本打印「Q2 − Q1」
+        #   与实际计算不符，报告会误导读者（2026-10-06 review 抓出）。
+        _hi = self.quantile_returns.index.max()
+        _lo = self.quantile_returns.index.min()
+        L.append(f"多空组合（Q{_hi} − Q{_lo}，共 {len(self.quantile_returns)} 组）"
+                 f"年化毛收益: {self.gross_spread*100:+.2f}%")
         L.append(f"  扣成本 {self.cost_round_trip*100:.2f}% 往返 × 换手 "
                  f"{self.turnover_mean*100:.1f}%  →  净 {self.net_spread_after_cost*100:+.2f}%")
         for n in self.notes:
@@ -137,14 +144,27 @@ def run_tear_sheet(
         bins=bins,
     )
     # bins 模式下实际箱数可能小于请求值（某箱无样本），用实际值做后续口径
-    n_groups = int(clean["factor_quantile"].nunique()) if len(clean) else 0
+    #
+    # 🔴 2026-10-06 review 抓出：必须用**真实标签集合**，不能用 nunique()。
+    #   alphalens 的 bins 标签**不保证是1..n 连续**。
+    #   实测（因子只有 {0,1} 两种取值 + bins=3）：
+    #     出现的标签   = [1, 3]← Q2 为空，标签跳号
+    #     nunique()    = 2                ← 当成「2 组」
+    #     max(标签)     = 3
+    #   三处连锁出错：
+    #     · tr 用 range(1, nunique+1) = {Q1, Q2} → **Q3 的换手根本没被统计**
+    #     · 成本乘数用 2 而非 3 → 净收益偏乐观
+    #     · summary 打印「Q2 − Q1」而 spread 实为 Q3 − Q1 → 标签与计算不符
+    labels = sorted(int(x) for x in clean["factor_quantile"].unique()) \
+        if len(clean) else []
     if bins is not None:
-        if n_groups < 2:
+        if len(labels) < 2:
             raise ValueError(
-                f"等宽分箱后有效组数 {n_groups} < 2，无法计算多空组合。"
+                f"等宽分箱后有效组数 {len(labels)} < 2，无法计算多空组合。"
                 f"因子取值可能过于集中，请检查 bins={bins} 是否合理"
             )
-        quantiles = n_groups
+        # 成本乘数用**最大标签**（= 组数），换手率覆盖**全部真实标签**
+        quantiles = max(labels)
 
     # ── IC：alphalens 只给每日值，均值/ICIR/t 需自行聚合 ──────────
     ic_daily = performance.factor_information_coefficient(clean)
@@ -171,8 +191,10 @@ def run_tear_sheet(
     keep = {_col(p) for p in periods}
     qr = qr[[c for c in qr.columns if c in keep]]
     tr = pd.DataFrame(
+        # ⚠️ 覆盖**全部真实标签**（可能是 [1, 3] 而非 [1, 2]），
+        #    漏掉最高分位会让 turnover_mean 偏小 → 净收益偏乐观。
         {q: performance.quantile_turnover(clean["factor_quantile"], q)
-         for q in range(1, quantiles + 1)}
+         for q in (labels or range(1, quantiles + 1))}
     )
     turnover_mean = float(tr.mean().mean()) if not tr.empty else np.nan
 
@@ -233,7 +255,12 @@ def subperiod_ic(
         f = factor[factor.index.get_level_values("date").isin(rng)]
         p = prices.loc[prices.index.intersection(rng)]
         n_assets = int(f.index.get_level_values("asset").nunique()) if len(f) else 0
-        base = {"区间": label, "标的数": n_assets, "日期数": 0,
+        base = {"区间": label, "标的数": n_assets,
+                # ⚠️ 日期数填**实际交易日数**，不是 0（2026-10-06 review 抓出）。
+                #   原先固定 0，导致「有数据但计算失败」与「完全无数据」
+                #   两行长得一模一样，读者无法区分。
+                "日期数": int(f.index.get_level_values("date").nunique())
+                if len(f) else 0,
                 "IC均值": np.nan, "ICIR": np.nan, "t值": np.nan,
                 "多空年化": np.nan, "多空净": np.nan}
         if f.empty or p.empty:
@@ -247,8 +274,14 @@ def subperiod_ic(
             r = run_tear_sheet(f, p, cfg, cost, factor_name,
                                demeaned=demeaned, zero_aware=zero_aware, bins=bins)
         except Exception as e:  # noqa: BLE001
-            # 报出来，但不中断——其他区间仍可能有结论
-            rows.append({**base, "说明": f"失败 {type(e).__name__}: {e}"[:120]})
+            # 报出来，但不中断——其他区间仍可能有结论。
+            # ⚠️ 只截**中间**，保留头尾：异常消息的根因常在末尾
+            #   （如 "cannot reindex on an axis with duplicate labels"），
+            #   粗暴截前 120 字会把根因切掉（2026-10-06 review 抓出）。
+            msg = f"{type(e).__name__}: {e}"
+            if len(msg) > 200:
+                msg = msg[:100] + f" …（省略 {len(msg) - 200} 字）… " + msg[-100:]
+            rows.append({**base, "说明": f"失败 {msg}"})
             continue
         ic1 = r.ic_by_period.loc[1] if 1 in r.ic_by_period.index else None
         rows.append({

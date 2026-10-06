@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import numpy as np
+
 import pandas as pd
 import pytest
 
@@ -200,3 +202,53 @@ class TestPriceVolumePxGuard:
         d = pd.DataFrame({"code": ["sh600519"], "date": [20240101],
                           "close": [10.0], "close_adj": [20.0]})
         assert float(_px(d, "close").iloc[0]) == 20.0
+
+class TestBinsQuantileLabels:
+    """bins 模式下分位标签可能**跳号**，不能用 ``nunique()`` 当组数。
+
+    实测（因子只有 {0, 1} 两种取值 + bins=3）：
+        出现的标签= [1, 3]（Q2 为空）
+        nunique()     = 2
+        max(标签)      = 3
+
+    早期版本用 ``range(1, nunique+1)`` 统计换手 → 只覆盖 {Q1, Q2}，
+    **Q3 的换手根本没被统计** → 成本乘数偏小 → 净收益偏乐观（不报错）。
+    """
+
+    @staticmethod
+    def _labels(factor: pd.Series, prices: pd.DataFrame, bins: int):
+        from alphalens.utils import get_clean_factor_and_forward_returns
+
+        clean = get_clean_factor_and_forward_returns(
+            factor, prices, quantiles=None, bins=bins, periods=[1],
+            max_loss=0.5)
+        return clean, sorted(int(x) for x in clean["factor_quantile"].unique())
+
+    @staticmethod
+    def _panel():
+        dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+        assets = list("ABCDEF")
+        factor = pd.Series([0.0, 1.0] * 9,
+                           index=pd.MultiIndex.from_product([dates, assets]))
+        prices = pd.DataFrame(np.linspace(1, 2, 18).reshape(3, 6),
+                              index=dates, columns=assets)
+        prices.index = prices.index.tz_localize(None)
+        return factor, prices
+
+    def test_标签确实会跳号(self) -> None:
+        factor, prices = self._panel()
+        clean, labels = self._labels(factor, prices, bins=3)
+        assert labels == [1, 3], f"预期跳号标签 [1,3]，实际 {labels}"
+        # 这就是不能用 nunique() 的理由
+        assert clean["factor_quantile"].nunique() != max(labels)
+
+    def test_换手率必须覆盖真实标签(self) -> None:
+        from alphalens.performance import quantile_turnover
+
+        factor, prices = self._panel()
+        clean, labels = self._labels(factor, prices, bins=3)
+        covered = {q for q in labels
+                   if quantile_turnover(clean["factor_quantile"], q)
+                   is not None}
+        assert covered == set(labels), \
+            f"换手率未覆盖全部分位：缺 {set(labels) - covered}"
