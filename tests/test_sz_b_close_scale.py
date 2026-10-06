@@ -104,6 +104,9 @@ class Test迁移SQL幂等:
             weekly_pairs=[("sz200011", 20230106, 0.59)],
         )
         assert "PRECHECK" in sql and "POSTCHECK" in sql
+        assert sql.count("-- PRECHECK") == 2    # 标签必须是注释行
+        assert "\nPRECHECK" not in sql          # 裸标签行禁（还原必败：去前缀即红）
+        assert "\nPOSTCHECK" not in sql
         assert "amount / (vol * close) BETWEEN 6.0 AND 15.0" in sql   # U7 污染区间
         assert "close_adj" not in sql       # B 股 close_adj 全历史 0 覆盖，无行可迁
         assert "mode=ro" not in sql         # SQL 交数据线执行（本工具绝不带写库语义出参）
