@@ -67,7 +67,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from factor_lab.config import SCALING_TRADING_DAYS, is_a_share
+from factor_lab.config import YEAR_TRADING_DAYS, is_a_share
 from factor_lab.data import all_codes, load_prices
 from factor_lab.market_rules import (
     board_of,
@@ -292,9 +292,16 @@ def audit_price_data(
     # 对等权买入持有的影响
     b_raw = (1 + ret.mean(axis=1)).cumprod().iloc[-1]
     b_clean = (1 + clean.mean(axis=1)).cumprod().iloc[-1]
-    # 交易日数折年数属 ② 时长换算（口径值 YEAR_TRADING_DAYS = 243）；
-    # 此处历史按 252 折算，本批值冻结不变（层间分歧另行处理）。
-    years = len(prices) / SCALING_TRADING_DAYS
+    # 交易日数折年数属 ② 时长换算兜底（无日期索引输入：交易日数 ÷ 年均交易日），
+    # 口径值 YEAR_TRADING_DAYS = 243。年化三层口径（PITFALLS P10「年化三层口径裁决」）：
+    #   ① 倍数换算 ×252/periods、σ×√252 → SCALING_TRADING_DAYS
+    #   ② 时长换算兜底（本行属此层）    → YEAR_TRADING_DAYS = 243
+    #   ③ 有日期的年跨越                → 自然日 365.25
+    # 此前注记的「层间分歧」在本行处理：历史输出按 252 折算、值冻结不倒改；
+    # 本次起新输出按 ② 层 = 243，差值打印行随行带折年系数注。
+    # （① 层系数串进 ② 层曾使年数记小约 3.57% =1−243/252、
+    #   annual_drag 记大约 3.7% =252/243−1。）
+    years = len(prices) / YEAR_TRADING_DAYS
 
     out = {
         "n_assets": int(prices.shape[1]),
@@ -324,7 +331,8 @@ def audit_price_data(
         print("  等权买入持有 10 年累计")
         print(f"    原始         {(b_raw-1)*100:>+7.1f}%")
         print(f"    清洗后       {(b_clean-1)*100:>+7.1f}%")
-        print(f"    → 两口径之差 {(out['annual_drag'])*100:>+7.3f}pp/年")
+        print(f"    → 两口径之差 {(out['annual_drag'])*100:>+7.3f}pp/年"
+              f"（②层时长兜底折年：年数 = 行数/{YEAR_TRADING_DAYS}）")
         if verbose:
             print()
             print("  ⚠️ 这个差值**不是复权质量指标**。它衡量「把超限日置 NaN 会改变多少」：")

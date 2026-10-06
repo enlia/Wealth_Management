@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "research" / "scripts"))
 
@@ -146,3 +147,66 @@ class TestClassifyResiduals:
         bad.iloc[7, :] = True
         out = audit.classify_residuals(adj, quoted=q, bad=bad)
         assert out == {"两口径同超限": 1, "仅复权口径超限": 1, "无法判定": 1}
+
+
+class TestAnnualDragYearSpan:
+    """annual_drag 的年数折算钉 ② 层时长兜底口径（243），不许串 ① 层倍数换算口径（252）。
+
+    年化三层口径（判例真源 PITFALLS P10「年化三层口径裁决」）：
+      ① 倍数换算 ×252（把每期比率放大到年频）；
+      ② 时长兜底 ÷243（无日期索引输入，交易日数折年数 —— annual_drag 属此层）；
+      ③ 有日期年跨越 ÷365.25 自然日。
+    """
+
+    def _panel(self) -> pd.DataFrame:
+        """确定性面板：sh600000 末日 −17% 除权跳空（会被剔除），sh600010 平稳参照。"""
+        idx = pd.date_range("2024-01-02", periods=20, freq="B")
+        return pd.DataFrame(
+            {
+                "sh600000": [10.0] * 19 + [8.3],
+                "sh600010": [10.0 + 0.05 * i for i in range(20)],
+            },
+            index=idx,
+        )
+
+    def _drag(self) -> tuple[float, float]:
+        """(annual_drag, 未年化的两口径总差)，同一面板固定输入。"""
+        px = self._panel()
+        out = audit.audit_price_data(px, verbose=False, quoted_prev=px.shift(1),
+                                     timeline=px)
+        total = out["ew_buy_hold_raw"] - out["ew_buy_hold_clean"]
+        assert abs(total) > 0, "面板构造失效：总差为 0 时钉不住折年系数"
+        return out["annual_drag"], total
+
+    def test_时长兜底年化常量是243(self) -> None:
+        assert audit.YEAR_TRADING_DAYS == 243, (
+            f"YEAR_TRADING_DAYS={audit.YEAR_TRADING_DAYS} —— "
+            "② 层时长兜底折年天数是 243（A 股年均交易日实测 2,611÷10.75≈242.9）；"
+            "252 是① 层倍数换算口径（config.SCALING_TRADING_DAYS），两语义不能串层"
+        )
+
+    def test_annual_drag按243折年(self) -> None:
+        """同输入下 annual_drag = 两口径总差 ÷（行数/243）；还原成 252 形态必 FAILED。"""
+        px = self._panel()
+        drag, total = self._drag()
+        assert drag == pytest.approx(total / (len(px) / 243), rel=1e-12), (
+            "annual_drag 的年数折算不是 243 —— 此处是② 层时长兜底语义"
+            "（交易日数折年数），按 PITFALLS P10 用 243，不得用① 层的 252"
+        )
+
+    def test_修复前后年化数值比值钉死243_252(self) -> None:
+        """同输入下 修复后/修复前 = 243/252 ≈ 0.9643；串层后比值会变成 1.0 而露馅。"""
+        px = self._panel()
+        drag, total = self._drag()
+        legacy = total / (len(px) / 252)          # 修复前按 252 折年的取值
+        assert drag / legacy == pytest.approx(243 / 252, rel=1e-12)
+        assert drag / legacy == pytest.approx(0.9643, rel=1e-3)
+
+    def test_差值打印行随行带折年系数注(self, capsys) -> None:
+        """verbose 输出的差值行带 ② 层折年系数注，输出自证口径（新输出带系数注）。"""
+        px = self._panel()
+        audit.audit_price_data(px, verbose=True, quoted_prev=px.shift(1),
+                               timeline=px)
+        text = capsys.readouterr().out
+        assert "②层时长兜底折年" in text, "差值打印行丢了折年口径注"
+        assert f"行数/{audit.YEAR_TRADING_DAYS}" in text, "折年系数注里没有具体系数"
