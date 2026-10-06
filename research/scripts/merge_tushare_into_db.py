@@ -199,8 +199,8 @@ def _report_factor_sanity(adj: pd.DataFrame) -> None:
     print(f"  归一化系数 norm：min={q['min']:.4f} p1={q['1%']:.4f} "
           f"中位={q['50%']:.4f} p99={q['99%']:.4f} max={q['max']:.4f}")
     bad = adj[adj["norm"] > 1.0 + 1e-6]
-    print(f"  系数 >1 的记录：{len(bad):,}（前复权应有>1 的早期记录，"
-          f"若为 0 说明 latest 取错了）")
+    print(f"  系数 >1 的记录：{len(bad):,}（norm=f(t)/f(最新) 应恒 ≤1，"
+          f"正常应为 0；若不为 0 说明 latest 取到了更早日期（Tushare 倒序坑））")
 
 
 def merge_industry(con: sqlite3.Connection, dry_run: bool) -> int:
