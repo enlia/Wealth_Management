@@ -58,6 +58,7 @@ from factor_lab.analysis.long_only import (  # noqa: E402
 from factor_lab.config import is_a_share  # noqa: E402
 from factor_lab.data import all_codes  # noqa: E402
 from factor_lab.factors.price_volume import compute_factor  # noqa: E402
+from report_disclaimers import agents_caliber  # noqa: E402
 
 # ⚠️ **re-export**：`load_long_chunked` 已搬到 `long_loader.py`（拆行数用），
 #   但 `run_limit_constraint.py` 等仍从本模块导入它。
@@ -396,6 +397,7 @@ def main() -> int:
         print(f"⚠ 版本记录失败: {e}")
 
     print("\n提示: 样本外结果才有参考价值；扣成本后为负的方案不可用。")
+    print(agents_caliber())
     print("      以上为统计检验，不构成投资建议。")
     return 0
 
