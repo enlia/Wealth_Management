@@ -33,8 +33,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "src" / "tools"))
 sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
+import pandas as pd  # noqa: E402
+from build_sqlite import SCHEMA, STOCK_INFO_CALIBER_META, derive_equity_caliber  # noqa: E402
 from check_units import (  # noqa: E402
     FAMILY_OTH_EQT_TOOLS,
     IDENTITY_ABS_TOL_YI,
@@ -222,3 +225,49 @@ class TestSnapshotPbGuard:
     def test_price或pb缺失不可检(self) -> None:
         assert not snapshot_pb_guard(None, 24.129, 0.48)["checkable"]
         assert not snapshot_pb_guard(11.57, 24.129, None)["checkable"]
+
+
+class TestStockInfoEquityCaliber:
+    """stock_info 派生口径统一：普通股权益口径列 + 口径记入 meta（U6 规则③/U3 处方）。
+
+    原生 net_assets（通达信 JZC）是【含其他权益工具】口径、bps（TZMGJZ）是
+    【普通股】口径，两列互推会错 17% 量级（A18 实证）。派生列
+    net_assets_ord = bps × shares 提供扣口径分子（≈ 归母 − oth_eqt_tools），
+    原生列保留、口径写进 meta，后缀 _ord = 普通股权益。"""
+
+    def test_net_assets_ord派生为bps乘shares_000001实值(self) -> None:
+        df = derive_equity_caliber(pd.DataFrame({
+            "code": ["sz000001"], "bps": [24.129],
+            "shares": [194.059187], "net_assets": [5482.14016],
+        }))
+        assert df["net_assets_ord"][0] == pytest.approx(4682.4541231230005, rel=1e-12)
+
+    def test_派生不覆写原生net_assets(self) -> None:
+        df = derive_equity_caliber(pd.DataFrame({
+            "code": ["sz000001"], "bps": [24.129],
+            "shares": [194.059187], "net_assets": [5482.14016],
+        }))
+        assert df["net_assets"][0] == 5482.14016, "原生含口径列必须原样保留"
+
+    def test_NULL传播不冒算(self) -> None:
+        df = derive_equity_caliber(pd.DataFrame({"bps": [None], "shares": [1.0]}))
+        assert df["net_assets_ord"].isna()[0]
+
+    def test_缺派生列显式抛错(self) -> None:
+        with pytest.raises(ValueError, match="net_assets_ord"):
+            derive_equity_caliber(pd.DataFrame({"bps": [24.129]}))
+
+    def test_meta口径记录带后缀与扣减式(self) -> None:
+        keys = {k for k, _ in STOCK_INFO_CALIBER_META}
+        assert keys == {
+            "stock_info.net_assets", "stock_info.net_assets_ord",
+            "stock_info.bps", "stock_info.shares",
+        }
+        by = dict(STOCK_INFO_CALIBER_META)
+        assert "oth_eqt_tools" in by["stock_info.net_assets_ord"]
+        assert "普通股" in by["stock_info.bps"]
+        assert "含其他权益工具" in by["stock_info.net_assets"]
+        assert "股" in by["stock_info.shares"], "shares 必须标注股口径（U3 同名不同纲）"
+
+    def test_schema带口径派生列(self) -> None:
+        assert "net_assets_ord REAL" in SCHEMA
