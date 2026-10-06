@@ -52,16 +52,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
-from factor_lab.analysis.long_only import (  # noqa: E402
-    CostModel,
-    PortfolioSpec,
-    breakeven_turnover,
-    build_long_only,
-    holdout_split,
-)
-from factor_lab.config import is_a_share  # noqa: E402
-from factor_lab.data import all_codes  # noqa: E402
-
 # 下面这些名字定义在拆分出的三个模块里，这里平铺转出，
 # 供 tests / run_size_decile.py / run_walk_forward.py 沿用既有导入路径。
 from long_only_data import (  # noqa: E402,F401
@@ -71,6 +61,16 @@ from long_only_data import (  # noqa: E402,F401
 )
 from long_only_panel import build_panel  # noqa: E402,F401
 from long_only_report import _bench_stats, _cross_z, combine, report  # noqa: E402,F401
+
+from factor_lab.analysis.long_only import (  # noqa: E402
+    CostModel,
+    PortfolioSpec,
+    breakeven_turnover,
+    build_long_only,
+    holdout_split,
+)
+from factor_lab.config import is_a_share  # noqa: E402
+from factor_lab.data import all_codes  # noqa: E402
 
 OUTPUT = ROOT / "runtime" / "long_only"
 BENCH = {"300": "399300.SZ"}
