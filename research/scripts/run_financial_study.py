@@ -157,8 +157,26 @@ def build_financial_factors(
         # ⚠️ 此处 mktcap 的单位是【亿元】：close(元/股) × shares(亿股) = 亿元
         #    与 stock_info.mktcap（【万元】，见 factor_lab.config.MARKET_CAP_UNIT）
         #    口径不同，不要拿它与 stock_info.mktcap 直接比。
-        #    用于 log 市值中性化时常数倍会被回归截距吸收，故结果一致
-        #    （实测残差差异 6.66e-16）。
+        #
+        # 🔴 **`close` 传的是未复权价**（与 PB 的分母 bps 同口径，见 main()）。
+        #    初版注释写「用于 log 市值中性化时常数倍会被回归截距吸收，
+        #    故结果一致（实测残差差异 6.66e-16）」—— **这个论证是错的**，
+        #    已被 2026-10-06 review 实测推翻：
+        #
+        #    log(cap_adj) − log(cap_raw) = log(adj_factor)，而复权因子
+        #    **逐股逐日不同**，不是全样本一个常数 ⇒ 截距吸收不成立。
+        #    实测逐日截面 std(log adj − log raw)：中位 0.0168、最大 0.0276
+        #    （极差最大 0.05）—— 显著非零。
+        #
+        #    那句 6.66e-16 来自「亿元 vs 万元」的单位换算差（**真**常数倍），
+        #    被错误推广到「复权口径」这个完全不同的场景 —— CODE_TRUST P23。
+        #
+        #    现状取舍：**接受**用未复权市值。
+        #    理由：PB 分母是账面价值（bps），与未复权价同口径；
+        #    若市值改用前复权，控制变量与因子分母就用两套「价格」口径。
+        #    市值**水平**的偏差被截距吸收，只有**截面排序**受影响，
+        #    而中性化用的是 log 市值 ⇒ 排序不变（log 变换保序）。
+        #    ⚠️ 这是「保序」层面的论证，不是「数值一致」—— 两者不可混同。
         daily["mktcap"] = daily["close"].to_numpy() * np.tile(sh, len(dates))
 
     daily = daily[np.isfinite(daily["close"]) & (daily["close"] > 0)].copy()
@@ -365,7 +383,7 @@ def main() -> int:
     # 🔴🔴 **必须同时取两种价格口径**（2026-10-06 实测 BLOCK）
     #   初版只取 `field="close"`（未复权），一个面板同时充当两个角色：
     #     · PB = close / bps        → 确实需要**未复权**价（bps 是财报披露的原始数字）
-    #     · alphalens 前瞻收益 / IC → **必须**用后复权价
+    #     · alphalens 前瞻收益 / IC → **必须**用前复权价
     #   ⇒ 收益端被除权缺口污染。实测全市场等权口径年化偏差：
     #       2016 −16.80pp / 2019 −10.80pp / 2021~2026 每年 −5.1 ~ −8.0pp
     #   **这个偏差大于本项目声称的任何因子收益**（最高的 ep 也只有 +6.1%）
@@ -373,8 +391,8 @@ def main() -> int:
     px_raw, px_adj = load_factor_prices(alive, start=cfg.start_date,
                                        end=cfg.end_date)
     prices_raw = px_raw
-    prices = px_adj          # 收益口径：后复权
-    print(f"      未复权 {px_raw.shape} / 后复权 {px_adj.shape}"
+    prices = px_adj          # 收益口径：前复权
+    print(f"      未复权 {px_raw.shape} / 前复权 {px_adj.shape}"
           f"（索引已校验一致），{time.perf_counter()-t0:.1f}s")
 
     # ── 2. 财务面板 ───────────────────────────────────────────
@@ -383,9 +401,9 @@ def main() -> int:
     panel = panel[panel["sym"].isin(alive)]
     print(f"      面板 {len(panel):,} 行，{panel['sym'].nunique():,} 只")
 
-    # ⚠️ **交易日轴取后复权面板**（它才是收益口径的时间轴），
+    # ⚠️ **交易日轴取前复权面板**（它才是收益口径的时间轴），
     #   但**PB/EP 的价格必须传未复权面板** —— bps/eps 是财报披露的原始数字，
-    #   与未复权价同口径。若这里传 `prices`（后复权），
+    #   与未复权价同口径。若这里传 `prices`（前复权），
     #   PB 会被复权因子抬高，等于按「今天的股本」算历史 PB。
     trading_days = prices.index
     # 总股本（用于市值中性化）

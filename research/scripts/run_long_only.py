@@ -131,7 +131,7 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         if "date" in long.columns:
             keep = ((long["date"] >= pd.Timestamp(ys))
                     & (long["date"] <= pd.Timestamp(ye)))
-        # 价格面板（后复权）也要留一份 —— 收益必须从价格算。
+        # 价格面板（前复权）也要留一份 —— 收益必须从价格算。
         # ⚠️ 价格面板**只能**用区间内行：收益是逐日的，
         #    混入上一年末会造出跨年首日的「伪收益」。
         if keep is not None:

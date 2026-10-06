@@ -83,7 +83,7 @@ def build_long_only(
     factor_values : 索引=日期，列=代码，因子值（越大越好），**已横截面标准化**
     spec          : 组合参数
     cost          : 交易成本
-    price_panel   : 索引=日期，列=代码，**后复权价**。
+    price_panel   : 索引=日期，列=代码，**前复权价**。
                     ⚠️ **必须传**。收益必须从价格算，不能从因子值算 ——
                     初版直接 `factor_values.pct_change()`，而 factor_values
                     是 z 分数（可为负、可跨股票差 10 倍），
@@ -105,10 +105,10 @@ def build_long_only(
         return {"ok": False, "reason": "因子值为空"}
     if price_panel is None or price_panel.empty:
         return {"ok": False,
-                "reason": "缺少 price_panel —— 收益必须从后复权价算，"
+                "reason": "缺少 price_panel —— 收益必须从前复权价算，"
                           "不能从因子值算（z 分数比值无意义）"}
 
-    # 收益：必须来自**后复权价**，且是下一期收益。
+    # 收益：必须来自**前复权价**，且是下一期收益。
     # ⚠️ 两个易错点：
     #   1. 不能从 factor_values 算 —— 那是 z 分数，比值无意义
     #   2. 必须是下一期 —— 因子在 d 日收盘才可得，

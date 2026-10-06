@@ -40,11 +40,11 @@
 它衡量的是**污染的潜在影响量级**，而不是「复权修好了没有」。
 
   · 对**未复权**价格：annual_drag ≈ −2.365pp/年（污染确实存在）
-  · 对**后复权**价格：超限记录应降到 ~0，annual_drag 也应趋近 0
+  · 对**前复权**价格：超限记录应降到 ~0，annual_drag 也应趋近 0
 
 所以审计必须能分别读两个字段。本脚本用 ``--field`` 控制：
   --field close      未复权（默认，体检用）
-  --field close_adj  后复权（修好后回归验证用）
+  --field close_adj  前复权（修好后回归验证用）
 
 ⚠️ 若`--field close_adj` 的异常数与`--field close` 几乎一样，
 说明并库没生效，不要通过调大容差来「修复」。
@@ -120,7 +120,7 @@ def judge_limit_rules(
        ``min(lim*TOL, …)`` 这类近似代替price_tolerance。
 
        涨跌幅限制是交易所对**报价**的约束，与复权无关。
-       实测：若用后复权价算容差，北交所某票后复权价恒为 1.30 元，
+       实测：若用前复权价算容差，北交所某票前复权价恒为 1.30 元，
        容差被算成 30.00%，而其真实涨幅恰为 +30.000%（合法封板）却被判超限；
        创业板/科创板异常数虚增近 4 倍（65 → 252 条/600 只·1 年），
        会得出「复权反而使污染变多 4 倍」的反向结论。
@@ -227,7 +227,7 @@ def audit_price_data(
 
     use_rules=True（默认）用 ``market_rules`` 的价格感知容差 + 新股窗口判定。
     quoted_prev / timeline 为**未复权**面板；检验 close_adj 时**必须**传入，
-    否则会用后复权价算容差、把合法涨跌停误判成超限。
+    否则会用前复权价算容差、把合法涨跌停误判成超限。
     """
     ret = prices.pct_change(fill_method=None)
     clean, bad = clean_returns(prices, quoted_prev=quoted_prev,
@@ -285,7 +285,7 @@ def audit_price_data(
             print()
             print("  ⚠️ 这个差值**不是复权质量指标**。它衡量「把超限日置 NaN 会改变多少」：")
             print("     · 对未复权价：超限多为假跳空 → 差值大= 污染重")
-            print("     · 对后复权价：超限多为**真实涨跌停**，置 NaN 会漏掉真实收益 →")
+            print("     · 对前复权价：超限多为**真实涨跌停**，置 NaN 会漏掉真实收益 →")
             print("       差值大 = 真实收益被误删，与污染无关")
             print("     → 判断复权是否成功，只看 `异常率`，不要看这个差值")
     return out
@@ -299,7 +299,7 @@ def main() -> int:
     ap.add_argument("--end", default="2026-09-30")
     ap.add_argument("--field", default="close",
                     choices=["close", "close_adj"],
-                    help="close=未复权（体检）；close_adj=后复权（修好后回归）")
+                    help="close=未复权（体检）；close_adj=前复权（修好后回归）")
     args = ap.parse_args()
 
     codes = [c for c in all_codes() if is_a_share(c)]
@@ -349,17 +349,17 @@ def main() -> int:
     print("关卡判定")
     print("=" * 70)
     if args.field == "close_adj":
-        # 后复权：判据是「规则内超限率」，不是与清洗后的差值。
+        # 前复权：判据是「规则内超限率」，不是与清洗后的差值。
         # 实测 99.7% 的残留超限在**未复权原始收益里同样超限** → 是源数据本身的错误，
         # 不是复权失败（详见 docs/03_项目报告/12_数据修复与因子研究.md）。
         ok = out["pct_bad"] < 0.005
         if ok:
-            print(f"  ✓ 后复权规则内超限率 {out['pct_bad']*100:.3f}% < 0.5%"
+            print(f"  ✓ 前复权规则内超限率 {out['pct_bad']*100:.3f}% < 0.5%"
                   f" → 允许做收益结论")
             print("    残留超限中约 99.7% 在未复权口径下同样超限，属源数据错误，")
             print("    已在因子研究阶段用 mask 剔除（见 run_factor_study.py）")
         else:
-            print(f"  ✗ 后复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5% → **禁止收益结论**")
+            print(f"  ✗ 前复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5% → **禁止收益结论**")
         return 0 if ok else 2
     if out["pct_bad"] >= 0.005:
         print(f"  ⚠️ 未复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5%，"

@@ -8,12 +8,12 @@
 | 角色 | 必须用哪个价 | 原因 |
 |---|---|---|
 | 算 PB / PE / EP | **未复权 `close`** | `bps`/`eps` 是财报里**实际披露**的每股数字，未复权价与它同一口径 |
-| 算前瞻收益 / IC / 回测 | **后复权 `close_adj`** | 未复权价在除权日出现**假跳空** |
+| 算前瞻收益 / IC / 回测 | **前复权 `close_adj`** | 未复权价在除权日出现**假跳空** |
 
 用一个面板服务两个角色 ⇒ 收益端被除权缺口污染。
 **实测全市场 5,606 只等权口径的年化偏差**：
 
-| 年份 | 未复权 | 后复权 | 偏差 |
+| 年份 | 未复权 | 前复权 | 偏差 |
 |---|---|---|---|
 | 2016 | −1.08% | +15.72% | **−16.80pp** |
 | 2019 | +41.06% | +51.86% | −10.80pp |
@@ -43,7 +43,7 @@ __all__ = ["FactorPrices", "load_factor_prices"]
 
 
 class FactorPrices(tuple):
-    """``(raw, adj)`` 具名对：未复权价 + 后复权价。
+    """``(raw, adj)`` 具名对：未复权价 + 前复权价。
 
     用 NamedTuple 之外的 tuple 子类是为了在解包时仍然可以
     ``raw, adj = load_factor_prices(...)``（多数脚本这么写），
@@ -62,7 +62,7 @@ class FactorPrices(tuple):
 
     @property
     def adj(self):
-        """后复权收盘价 —— **所有收益、IC、回测都必须用这个**。"""
+        """前复权收盘价 —— **所有收益、IC、回测都必须用这个**。"""
         return self[1]
 
 
@@ -71,15 +71,15 @@ def load_factor_prices(
     start: str | None = None,
     end: str | None = None,
 ) -> FactorPrices:
-    """同时取未复权与后复权收盘价，返回具名对。
+    """同时取未复权与前复权收盘价，返回具名对。
 
     ⚠️ 两个面板**行索引与列索引必须完全一致** ——
     `build_financial_factors` 会用 raw 的index 当交易日轴，
     再用 adj 算收益；若两者日期轴不一致，会静默错位。
     这里显式校验，不一致直接抛错（禁止静默 fallback，ENGINEERING 第四节）。
     """
-    raw = load_prices(codes, start, end, field="close")
-    adj = load_prices(codes, start, end, field="close_adj")
+    raw = load_prices(codes, start, end, "close")
+    adj = load_prices(codes, start, end, "close_adj")
     if raw.empty or adj.empty:
         raise ValueError(
             f"价格面板为空：raw {raw.shape} / adj {adj.shape}。"
