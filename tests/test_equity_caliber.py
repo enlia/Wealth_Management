@@ -69,6 +69,19 @@ DB_SKIP = pytest.mark.skipif(
 def _ro_con() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
 
+
+def _run_check_with_probes(probes, con) -> tuple[list[str], list[str]]:
+    """临时换探针清单跑 check_equity_caliber（跑完还原），返回 (msgs, warns)。"""
+    import check_units as cu
+
+    saved = cu.PROBES
+    cu.PROBES = probes
+    try:
+        return cu.check_equity_caliber(con)
+    finally:
+        cu.PROBES = saved
+
+
 # 四票夹具：(code, 归母权益亿元, 其他权益工具亿元(NULL→None), 总股本股, 库内 bps 元/股)
 # 出处：market.db ts_balance_sheet / ts_fina_indicator @20260630（report_type='1'）
 FOUR_VOTES = [
@@ -244,6 +257,111 @@ class TestSnapshotPbGuard:
         assert not snapshot_pb_guard(None, 24.129, 0.48)["checkable"]
         assert not snapshot_pb_guard(11.57, 24.129, None)["checkable"]
 
+    def test_price为0停牌形态不可检不误报(self) -> None:
+        """price=0（停牌/退市形态）必须落不可检分支：不许算出 ratio=0 冒判混日期嫌疑。"""
+        g = snapshot_pb_guard(0, 24.129, 0.48)
+        assert not g["checkable"], g
+        assert g["missing"] == ["price"], g
+
+    def test_price为负脏数据不可检不误报(self) -> None:
+        g = snapshot_pb_guard(-3.5, 24.129, 0.48)
+        assert not g["checkable"], g
+        assert g["missing"] == ["price"], g
+
+    def test_低pb舍入界内不误拦_pb048(self) -> None:
+        """pb 两位小数的舍入界是绝对 ±0.005：pb=0.48 时相对界 1.04%，旧 1% 相对容差会误拦
+        同日快照低 pb 票；复合容差 max(0.0051, 0.01×pb) 必须放行。"""
+        g = snapshot_pb_guard(0.485, 1.0, 0.48)   # |ratio−pb| = 0.0050
+        assert g["checkable"] and g["pass"], g
+
+    def test_复合容差边界双向_pb048(self) -> None:
+        inside = snapshot_pb_guard(0.485, 1.0, 0.48)     # 0.0050 ≤ max(0.0051, 0.01×0.48)=0.0051
+        outside = snapshot_pb_guard(0.4853, 1.0, 0.48)   # 0.0053 > 0.0051
+        assert inside["pass"] and not outside["pass"], (inside, outside)
+
+    def test_复合容差常显式(self) -> None:
+        import check_units as cu
+
+        assert cu.PB_ROUND_ABS_TOL == 0.0051, "两位小数舍入界（绝对）"
+        assert cu.PB_REL_TOL == 0.01, "相对带（既有名，与 test_容差显式为1pct 同源）"
+
+
+class TestProbeExplicitMissingShare:
+    """缺 total_share → 显式缺件态、单票不中断全轮（活反例 sh600919@20260630 total_share=NULL）。
+
+    修复前该形态在 probe 内抛 ValueError 整轮崩，与 docstring「缺行/缺基准/归母 NULL
+    → status 显式」不一致。"""
+
+    @staticmethod
+    def _mk_db() -> sqlite3.Connection:
+        con = sqlite3.connect(":memory:")
+        con.execute(
+            "CREATE TABLE ts_balance_sheet (ts_code TEXT, end_date INT,"
+            " total_hldr_eqy_exc_min_int REAL, total_hldr_eqy_inc_min_int REAL,"
+            " minority_int REAL, oth_eqt_tools REAL, total_share REAL, report_type TEXT)"
+        )
+        con.execute("CREATE TABLE ts_fina_indicator (ts_code TEXT, end_date INT, bps REAL)")
+        con.execute("CREATE TABLE stock_info (code TEXT, price REAL, bps REAL, pb REAL)")
+        con.executemany(
+            "INSERT INTO ts_balance_sheet VALUES (?,?,?,?,?,?,?,?)",
+            [
+                # sh600919@20260630 活反例实值（market.db 只读取证）：total_share=NULL
+                ("sh600919", 20260630, 3513.36365, 3636.85184,
+                 123.48819, 799.7783, None, "1"),
+                # 健康对照行（sz000001 夹具值，oth=800 亿 → 必产出族标记记录）
+                ("sz000001", 20260630, 5482.14, 5482.14,
+                 None, 800.0, 19406000000.0, "1"),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO ts_fina_indicator VALUES (?,?,?)",
+            [("sh600919", 20260630, 14.7869), ("sz000001", 20260630, 24.1273)],
+        )
+        con.executemany(
+            "INSERT INTO stock_info VALUES (?,?,?,?)",
+            [("sh600919", 12.38, 14.79, 0.84), ("sz000001", 11.57, 24.129, 0.48)],
+        )
+        con.commit()
+        return con
+
+    def test_600919缺total_share返回显式缺件态不冒算(self) -> None:
+        con = self._mk_db()
+        p = probe_equity_row(con, "sh600919")           # 不许抛错
+        assert p["status"] != "ok", p
+        assert "total_share" in p["status"], p
+        assert "verdict" not in p, "缺分母不许产出对账判读"
+
+    def test_缺total_share单票不中断全轮(self) -> None:
+        con = self._mk_db()
+        msgs, warns = _run_check_with_probes(
+            [("sh600919", "600919.SH", "活反例缺股本"),
+             ("sz000001", "000001.SZ", "健康对照")],
+            con,
+        )
+        assert any("活反例缺股本" in m and "total_share" in m for m in msgs), msgs
+        assert any("健康对照" in w and FAMILY_OTH_EQT_TOOLS in w for w in warns), \
+            "缺件票之后的健康票必须继续处理并留痕（其他权益工具族记录）"
+
+    def test_逐票异常被捕获归msgs不中断全轮(self, monkeypatch) -> None:
+        def _boom(_con, code):
+            if code == "sh600919":
+                raise RuntimeError("单票异常测试桩")
+            return {
+                "code": code, "status": "ok",
+                "verdict": {"pass_c": True, "rel_c": 1e-7, "rel_a": 1e-7,
+                            "family": None, "implied_c": 1.0},
+                "oth_eqt_tools_yi": 0.0, "db_bps": 1.0,
+                "identity": {"checkable": False, "missing": ["x"]},
+                "pb": {"checkable": False, "missing": ["y"]},
+            }
+
+        monkeypatch.setattr("check_units.probe_equity_row", _boom)
+        msgs, _warns = _run_check_with_probes(
+            [("sh600919", "600919.SH", "异常票"), ("sh600519", "600519.SH", "健康票")],
+            self._mk_db(),
+        )
+        assert any("异常票" in m and "捕获" in m for m in msgs), msgs
+
 
 class TestStockInfoEquityCaliber:
     """stock_info 派生口径统一：普通股权益口径列 + 口径记入 meta（U6 规则③/U3 处方）。
@@ -291,14 +409,15 @@ class TestStockInfoEquityCaliber:
         assert "net_assets_ord REAL" in SCHEMA
 
 
-class TestProbeListSix:
-    """探针清单 4→6：两只其他权益工具存量大户入列（U6 口径项的实数据形态）。"""
+class TestProbeListSeven:
+    """探针清单 6→7：补 sh600011 双高边界锚（oth 53.25% + minority 52.75%，敞口谱推到极端档）。"""
 
-    def test_探针恰6只且含两只其他权益工具大户(self) -> None:
+    def test_探针恰7只且含双高边界锚(self) -> None:
         codes = [p[0] for p in PROBES]
-        assert len(codes) == 6
+        assert len(codes) == 7
         assert codes == [
-            "sh600519", "sz000001", "sh601318", "sz300750", "sh600036", "sh601288",
+            "sh600519", "sz000001", "sh601318", "sz300750",
+            "sh600036", "sh601288", "sh600011",
         ]
 
 
@@ -370,7 +489,7 @@ class TestFixSqlIdempotent:
 class TestEquityProbeOnMarketDb:
     """真库（market.db 只读）六探针与两守卫的双向实证；无产物口径下整类跳过。"""
 
-    def test_六探针C式全收敛(self) -> None:
+    def test_全探针C式全收敛(self) -> None:
         con = _ro_con()
         try:
             for code, _, _name in PROBES:
@@ -381,16 +500,25 @@ class TestEquityProbeOnMarketDb:
         finally:
             con.close()
 
-    def test_族标记落在三只其他权益工具票(self) -> None:
+    def test_600011双高边界锚relC应小于十万分之一(self) -> None:
+        con = _ro_con()
+        try:
+            p = probe_equity_row(con, "sh600011")
+        finally:
+            con.close()
+        assert p["status"] == "ok", p
+        assert p["verdict"]["rel_c"] < 1e-5, p["verdict"]
+
+    def test_族标记落在四只其他权益工具票(self) -> None:
         con = _ro_con()
         try:
             fam = {code: probe_equity_row(con, code)["verdict"]["family"]
                    for code, _, _ in PROBES}
         finally:
             con.close()
-        # oth_eqt_tools>0 的三票（000001=800 亿/600036=1999.89 亿/601288=4700 亿）
-        # 必须 A 败 C 胜并标记；其余三票两式同判，不标记。
-        for code in ("sz000001", "sh600036", "sh601288"):
+        # oth_eqt_tools>0 的四票（000001=800 亿/600036=1999.89 亿/601288=4700 亿/
+        # 600011=734.75 亿）必须 A 败 C 胜并标记；其余三票两式同判，不标记。
+        for code in ("sz000001", "sh600036", "sh601288", "sh600011"):
             assert fam[code] == FAMILY_OTH_EQT_TOOLS, (code, fam)
         for code in ("sh600519", "sh601318", "sz300750"):
             assert fam[code] is None, (code, fam)
@@ -402,7 +530,7 @@ class TestEquityProbeOnMarketDb:
         finally:
             con.close()
         assert not g["sz000001"]["checkable"], "000001 minority_int=NULL 应显式不可检"
-        for code in ("sh600519", "sh601318", "sz300750", "sh600036", "sh601288"):
+        for code in ("sh600519", "sh601318", "sz300750", "sh600036", "sh601288", "sh600011"):
             assert g[code]["checkable"] and g[code]["pass"], (code, g[code])
 
     def test_自洽守卫真库能拦到混日期快照(self) -> None:
