@@ -40,16 +40,34 @@ import pandas as pd  # noqa: E402
 from build_sqlite import SCHEMA, STOCK_INFO_CALIBER_META, derive_equity_caliber  # noqa: E402
 from check_units import (  # noqa: E402
     FAMILY_OTH_EQT_TOOLS,
+    FIX_MKTCAP_UNIT_SQL,
     IDENTITY_ABS_TOL_YI,
     PB_REL_TOL,
+    PROBES,
+    apply_fix_sql,
+    assert_fix_sql_idempotent,
+    check_equity_caliber,
     compare_bps_with_db,
     equity_identity_guard,
     implied_bps_a,
     implied_bps_c,
     ordinary_equity_yi,
+    probe_equity_row,
     require_oth_eqt_tools_column,
     snapshot_pb_guard,
+    stock_info_fix_copy,
 )
+
+from factor_lab.config import DB_PATH  # noqa: E402
+
+DB_SKIP = pytest.mark.skipif(
+    not Path(DB_PATH).exists(),
+    reason=f"数据产物缺失：{DB_PATH} 不存在（无产物口径），真库权益探针跳过",
+)
+
+
+def _ro_con() -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
 
 # 四票夹具：(code, 归母权益亿元, 其他权益工具亿元(NULL→None), 总股本股, 库内 bps 元/股)
 # 出处：market.db ts_balance_sheet / ts_fina_indicator @20260630（report_type='1'）
@@ -271,3 +289,139 @@ class TestStockInfoEquityCaliber:
 
     def test_schema带口径派生列(self) -> None:
         assert "net_assets_ord REAL" in SCHEMA
+
+
+class TestProbeListSix:
+    """探针清单 4→6：两只其他权益工具存量大户入列（U6 口径项的实数据形态）。"""
+
+    def test_探针恰6只且含两只其他权益工具大户(self) -> None:
+        codes = [p[0] for p in PROBES]
+        assert len(codes) == 6
+        assert codes == [
+            "sh600519", "sz000001", "sh601318", "sz300750", "sh600036", "sh601288",
+        ]
+
+
+class TestFixSqlIdempotent:
+    """市值量纲修复 SQL 必须幂等：重跑结果不变（修复工具自己不许带二次事故）。
+
+    旧提示 `UPDATE stock_info SET mktcap *= 1e4` 是整列乘法，重跑再放大 1e4。"""
+
+    @staticmethod
+    def _fixture() -> sqlite3.Connection:
+        con = sqlite3.connect(":memory:")
+        con.execute(
+            "CREATE TABLE stock_info (code TEXT PRIMARY KEY, mktcap REAL,"
+            " float_mktcap REAL, price REAL, shares REAL)"
+        )
+        con.executemany(
+            "INSERT INTO stock_info VALUES (?,?,?,?,?)",
+            [
+                # 亿元形态行（体量反推价 = 价格，该被修一次）
+                ("bad", 4682.14, 3000.0, 24.1273, 194.06),
+                # 已是万元形态行（反推价 = 价格，不许动）
+                ("ok", 25125359.4, 25125359.4, 200.9898, 12.500816),
+                # 两种形态都对不上：属数值问题不是量纲问题，不许盲乘
+                ("odd", 999.0, 999.0, 50.0, 2.0),
+            ],
+        )
+        con.commit()
+        return con
+
+    def test_只修亿元形态行且恰放大一次(self) -> None:
+        con = self._fixture()
+        apply_fix_sql(con)
+        rows = {r[0]: r[1:] for r in con.execute("SELECT * FROM stock_info")}
+        assert rows["bad"][0] == pytest.approx(4682.14 * 1e4, rel=1e-12)
+        assert rows["bad"][1] == pytest.approx(3000.0 * 1e4, rel=1e-12)
+        assert rows["ok"] == (25125359.4, 25125359.4, 200.9898, 12.500816), "万元行不许动"
+        assert rows["odd"] == (999.0, 999.0, 50.0, 2.0), "形态不明行不许盲乘"
+
+    def test_重跑零变动_幂等断言(self) -> None:
+        con = self._fixture()
+        r1 = assert_fix_sql_idempotent(con)
+        assert r1 == {"first_run_rows": 1, "second_run_rows": 0, "idempotent": True}
+        r2 = assert_fix_sql_idempotent(con)
+        assert r2["first_run_rows"] == 0 and r2["second_run_rows"] == 0
+
+    def test_修复SQL带形态条件_非整列乘法(self) -> None:
+        assert "UPDATE stock_info" in FIX_MKTCAP_UNIT_SQL
+        assert "WHERE" in FIX_MKTCAP_UNIT_SQL, "必须带量纲形态条件，否则重跑即二次放大"
+        assert "*= 1e4" not in FIX_MKTCAP_UNIT_SQL
+
+    def test_旧式整列乘法重跑必变_缺陷写法反例(self) -> None:
+        legacy = "UPDATE stock_info SET mktcap = mktcap * 1e4, float_mktcap = float_mktcap * 1e4"
+        con = self._fixture()
+        con.execute(legacy)
+        once = sorted(con.execute("SELECT * FROM stock_info"))
+        con.execute(legacy)
+        twice = sorted(con.execute("SELECT * FROM stock_info"))
+        assert once != twice, "整列乘法若重跑不变，本反例失效（口径已改动？）"
+
+    def test_stock_info副本不触真库(self) -> None:
+        src = self._fixture()
+        copy = stock_info_fix_copy(src)
+        apply_fix_sql(copy)
+        rows = {r[0] for r in src.execute("SELECT code FROM stock_info WHERE mktcap > 1e7")}
+        assert rows == {"ok"}, "修复试验只许在副本上做"
+
+
+@DB_SKIP
+class TestEquityProbeOnMarketDb:
+    """真库（market.db 只读）六探针与两守卫的双向实证；无产物口径下整类跳过。"""
+
+    def test_六探针C式全收敛(self) -> None:
+        con = _ro_con()
+        try:
+            for code, _, _name in PROBES:
+                p = probe_equity_row(con, code)
+                assert p["status"] == "ok", (code, p)
+                assert p["verdict"]["pass_c"], (code, p["verdict"])
+                assert p["verdict"]["rel_c"] < 1e-5, (code, p["verdict"])
+        finally:
+            con.close()
+
+    def test_族标记落在三只其他权益工具票(self) -> None:
+        con = _ro_con()
+        try:
+            fam = {code: probe_equity_row(con, code)["verdict"]["family"]
+                   for code, _, _ in PROBES}
+        finally:
+            con.close()
+        # oth_eqt_tools>0 的三票（000001=800 亿/600036=1999.89 亿/601288=4700 亿）
+        # 必须 A 败 C 胜并标记；其余三票两式同判，不标记。
+        for code in ("sz000001", "sh600036", "sh601288"):
+            assert fam[code] == FAMILY_OTH_EQT_TOOLS, (code, fam)
+        for code in ("sh600519", "sh601318", "sz300750"):
+            assert fam[code] is None, (code, fam)
+
+    def test_恒等式守卫真库双向(self) -> None:
+        con = _ro_con()
+        try:
+            g = {code: probe_equity_row(con, code)["identity"] for code, _, _ in PROBES}
+        finally:
+            con.close()
+        assert not g["sz000001"]["checkable"], "000001 minority_int=NULL 应显式不可检"
+        for code in ("sh600519", "sh601318", "sz300750", "sh600036", "sh601288"):
+            assert g[code]["checkable"] and g[code]["pass"], (code, g[code])
+
+    def test_自洽守卫真库能拦到混日期快照(self) -> None:
+        con = _ro_con()
+        try:
+            g = {code: probe_equity_row(con, code)["pb"] for code, _, _ in PROBES}
+        finally:
+            con.close()
+        for code in ("sh600519", "sz000001", "sh600036", "sh601288"):
+            assert g[code]["pass"], (code, g[code])
+        n_flagged = sum(1 for code in ("sh601318", "sz300750") if not g[code]["pass"])
+        assert n_flagged >= 1, "已知混日期快照票应被守卫拦下（A18 §五附 2 票违例）"
+
+    def test_检查3返回两级清单_幂等断言常驻(self) -> None:
+        con = _ro_con()
+        try:
+            msgs, warns = check_equity_caliber(con)
+            fix_probe = assert_fix_sql_idempotent(stock_info_fix_copy(con))
+        finally:
+            con.close()
+        assert isinstance(msgs, list) and isinstance(warns, list)
+        assert fix_probe["idempotent"] and fix_probe["second_run_rows"] == 0
