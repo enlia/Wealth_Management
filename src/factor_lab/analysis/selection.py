@@ -36,6 +36,57 @@ from __future__ import annotations
 import numpy as np
 
 
+def align_masks(buy_ok, sell_ok, factor_values) -> tuple:
+    """把涨跌停掩码对齐到因子面板并转 numpy，**标签不符直接抛错**。
+
+    ⚠️⚠️ **必须校验标签，不能只校验形状**（review 2026-10-06 抓出）：
+       下游是 `mask.to_numpy()` 按**位置**取值的，
+       只要形状相同，列序不同的两个面板会**静默错配**：
+       第 i 个因子值配到第 i 个涨跌停标记，谁也不报错。
+
+       而「形状恰好相同」在真实数据里**很容易发生** ——
+       实测 `run_limit_constraint.py` 里两个面板都由 `pivot_table`
+       生成（都会排序），所以列序一致纯属**巧合**，
+       任一侧改成 `groupby().unstack()` 或加一列过滤就立刻失效。
+
+       ⇒ 判据必须是 `index.equals` 且 `columns.equals`，
+         两者任一不符就抛错，**不做 reindex 兜底**
+         （reindex 会掩盖「调用方本该自己保证对齐」这个契约）。
+    """
+    import pandas as pd  # 局部导入：本模块其余部分不依赖 pandas
+
+    if buy_ok is None and sell_ok is None:
+        return None, None
+
+    def _one(mask, name):
+        if mask is None:
+            return None
+        if not isinstance(mask, pd.DataFrame):
+            raise TypeError(f"{name} 必须是 DataFrame，收到 {type(mask)}")
+        if mask.shape != factor_values.shape:
+            raise ValueError(
+                f"{name} 形状 {mask.shape} 与因子面板 "
+                f"{factor_values.shape} 不一致，拒绝继续。\n"
+                f"  静默对齐会让「第 i 个因子值」配到"
+                f"「第 i 个涨跌停标记」，列序不同即错配且不报错。")
+        if not mask.index.equals(factor_values.index):
+            raise ValueError(
+                f"{name} 日期索引与因子面板不一致，拒绝继续。\n"
+                f"  形状相同但标签不同 ⇒ 按位置取值会静默错配。\n"
+                f"  mask  索引: {mask.index[:2].tolist()}…\n"
+                f"  factor 索引: {factor_values.index[:2].tolist()}…")
+        if not mask.columns.equals(factor_values.columns):
+            n_diff = len(set(mask.columns) ^ set(factor_values.columns))
+            raise ValueError(
+                f"{name} 列标签与因子面板不一致（对称差 {n_diff} 列），"
+                f"拒绝继续。\n"
+                f"  ⚠️ 形状相同不代表列序相同 —— 按位置取值会静默错配。\n"
+                f"  请在构造掩码时显式 reindex(columns=factor_values.columns)。")
+        return mask.to_numpy(dtype=bool)
+
+    return _one(buy_ok, "buy_ok"), _one(sell_ok, "sell_ok")
+
+
 def rank_topk(factor_mat: np.ndarray, k: int) -> np.ndarray:
     """按因子值降序取每行前 k 只，返回列索引矩阵 (T, k)。
 

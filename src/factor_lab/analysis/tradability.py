@@ -132,13 +132,37 @@ def load_limit_panel(limit_path: Path, start: str, end: str,
 
 
 def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
-                tol: float = 1e-6) -> tuple[pd.DataFrame, pd.DataFrame]:
+                tol: float = 1e-6,
+                unlisted_state: str = "tradable") -> tuple:
     """判定「封涨停」与「封跌停」。
 
     参数
     ----
     close : **未复权**收盘价面板 (日期 × 代码)
     up/dn : `stk_limit` 的原始涨跌停价面板（未复权口径）
+    unlisted_state : `close` 为 NaN 时怎么判。**这是全项目最容易被忽略的口径分叉**。
+
+       ⚠️⚠️ **`close` 缺失有两种截然不同的成因，处理方式必须不同**：
+       | 成因 | 占比（实测 2016-2026 全市场） | 正确处理 |
+       |---|---|---|
+       | **未上市 / 已退市** | 主体 | 不可交易，但**不该被当成"封板"** |
+       | **停牌**（当日有票但无成交） | 少量 | 不可交易（真的动不了） |
+
+       实测把两者混为一谈的后果（2026-10-06 全市场对照）：
+       - 判「买不进 27.45% / 卖不掉 26.78%」，而**真封涨停只有 1.11%、真封跌停 0.43%**
+       - 26.34% 的「不可交易」纯粹是「这只票当时还没上市或已经退市」
+       - ⚠️ **退市股会被永久锁仓**：`sell_ok` 恒为 False ⇒ 卖出端强制保留
+         ⇒ 组合里出现一只**永不消失的僵尸持仓**，其收益被
+         `nan_to_num` 填成 0⇒ 组合收益被稀释，且**换手被压低**
+       - 实测「有约束」版本年化反而**上升** +1.20%/+1.38%/+1.95%
+         —— 这不是约束带来的收益，是**约束把股票池悄悄缩小了**。
+
+       ⇒ 默认 `unlisted_state="tradable"`：**没数据 = 不视为封板**。
+         理由：未上市/已退市在因子层面本来就有因子值 NaN，
+         不会被选进候选池（`rank_topk` 把 NaN 排到末尾）；
+         **在选股层额外判一遍「不可买」是重复劳动，且引入上面那个bug。**
+         若调用方确实要把「缺数据」也当不可交易（如手工指定股票池），
+         传 `unlisted_state="blocked"`，但**必须同时处理退市股的退出**。
 
     ⚠️ **close 必须是未复权价**，不能用 close_adj。
        实测：`sh600519` 2024-01-02 收盘 1685.01、后复权 1531.31，
@@ -147,13 +171,13 @@ def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
        约束彻底失效却不报任何错，是最隐蔽的静默 fallback。
        要用后复权价，必须先把涨跌停价也乘上同一复权因子。
 
-    ⚠️ **NaN 必须当「不可交易」而不是「未封板」**。
-       NaN 有两种来源：该股未上市/已退市，或 stk_limit 未覆盖。
-       一律填 False 会让「没数据的票」变成可随意买卖 —— 恰恰相反。
-       故此处填 **True**（视为封板 = 不可交易），宁可少买不可乱买。
+    ⚠️ **不能只靠 fillna**：`close >= NaN` 返回 False（不是 NaN），
+       实测导致 fillna(True) 永不触发——
+       涨跌停价缺失的格子被当成「未封板」= 可随意买卖。
+       连fillna 的兜底都失效，比填 False 更隐蔽。
 
     ⚠️ **必须做口径自检**（review 实测）：
-       传错close 时全表 NaN → `fillna(True)` → **所有股票都判为不可交易**，
+       传错close 时全表 NaN → 一律判不可交易 ⇒ **所有股票都不可买**，
        结果是「一只都买不了」，而代码不报任何错。
        实测两种错法的表现：
          传后复权价→ 封涨停率 0.79% 稀释到 0.25%（静默削弱 2/3）
@@ -169,9 +193,12 @@ def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
           `ValueError: Can only compare identically-labeled`；
           而手动 reindex 兜底又大概率对不上 → 全部判成不可交易
 
-    故此处**统一 reindex 到 close 的形状**，并校验覆盖率。
-    reindex 后缺失的格子走「不可交易」，语义正确。
+       故此处**统一 reindex 到 close 的形状**，并校验覆盖率。
     """
+    if unlisted_state not in ("tradable", "blocked"):
+        raise ValueError(
+            f"unlisted_state 只能是 'tradable' / 'blocked'，"
+            f"收到 {unlisted_state!r}")
     up = up.reindex(index=close.index, columns=close.columns)
     dn = dn.reindex(index=close.index, columns=close.columns)
     cov_close = float(close.notna().to_numpy().mean())
@@ -183,12 +210,18 @@ def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
             f"up 索引 {type(up.index).__name__}\n"
             f"  ⚠️ 若继续执行，缺数据会被判为「不可交易」"
             f"（可能一只都买不了）且不报错。")
-    # ⚠️ **不能只靠 fillna**：`close >= NaN` 返回 False（不是 NaN），
-    #   实测导致 fillna(True) 永不触发 ——
-    #   涨跌停价缺失的格子被当成「未封板」= 可随意买卖。
-    #   连fillna 的兜底都失效，比填 False 更隐蔽。
-    limit_up = (close >= up - tol) | close.isna() | up.isna()
-    limit_dn = (close <= dn + tol) | close.isna() | dn.isna()
+    # ⚠️ **涨跌停价缺失一律当「封板」**（= 不可交易，保守方向）：
+    #   这与 `close` 缺失是两回事 —— 前者是「本该有数据却没有」
+    #   （数据缺口，保守处理），后者是「本来就没交易」（见 unlisted_state）。
+    no_px = up.isna() | dn.isna()
+    limit_up = (close >= up - tol) | no_px
+    limit_dn = (close <= dn + tol) | no_px
+    if unlisted_state == "blocked":
+        # 调用方显式要求「缺 close 也算不可交易」。
+        # ⚠️ 此时退市股会被永久锁仓（sell_ok 恒 False），
+        #   调用方**必须**自行处理退出，否则组合里会出现僵尸持仓。
+        limit_up = limit_up | close.isna()
+        limit_dn = limit_dn | close.isna()
     return limit_up.fillna(True), limit_dn.fillna(True)
 
 
