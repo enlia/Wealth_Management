@@ -270,7 +270,12 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
             # 按自然年分段拉。用于数据量超过翻页上限的接口：
             # 实测 disclosure_date 无参数翻页 60 页只拿到 12 万行，
             # 数据停在 2016-04，近 10 年全缺 —— 分段才是可靠做法。
-            y0, y1 = int(START[:4]), int(END[:4])
+            #
+            # ⚠️ start_year 缺省用 START 的年份，但**存量数据**要显式往前推：
+            #   实测 namechange 无参 13,889 行中 7,517 行是 1990~2014 的历史更名，
+            #   若从 START(20151201) 的2015 开始分段，这 15 年全丢。
+            y0 = int(spec.get("start_year", START[:4]))
+            y1 = int(END[:4])
             years = list(range(y0, y1 + 1))
             print(f"    {len(years)} 个自然年（{y0}~{y1}），每年 1 次请求+翻页")
             for i, y in enumerate(years, 1):
@@ -318,6 +323,17 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
         return {"task": name, "failed": True}
 
     df = pd.concat(parts, ignore_index=True)
+    # ⚠️ 先做**完全行**去重，再做主键去重。
+    #    逐只拉的任务（by_stock）在中断重跑时会拿到重复分片，
+    #    实测 fina_indicator 有 140,297 行完全重复（占 33%，
+    #    2,411 只股票各出现 100 次而正常只该有约 42 个报告期）。
+    #    整行相同说明是同一次请求被重复拼接，不是数据本身有多个版本。
+    n_raw = len(df)
+    df = df.drop_duplicates()
+    n_exact_dup = n_raw - len(df)
+    if n_exact_dup:
+        print(f"    去完全重复行 -{n_exact_dup:,}（{n_exact_dup/n_raw*100:.1f}%）")
+
     # 财务类接口同报告期可能多次覆盖，去重后保存。
     # ⚠️ 去重键必须包含「区分不同实体的字段」：
     #   index_weight 按 trade_date 去重会丢掉同一天其它指数的成分

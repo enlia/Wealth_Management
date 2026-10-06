@@ -144,11 +144,18 @@ TASKS: dict[str, dict] = {
     },
     "namechange": {
         "kind": "by_year", "p": "P3", "desc": "更名记录",
-        "est_min": 1, "note": "ST 摘帽/戴帽历史 —— 规避特殊处理股",
+        "start_year": 1990,
+        "est_min": 1,
+        "note": "ST 摘帽/戴帽历史。⚠️ 存量数据**不能**按 START(20151201) 过滤——"
+                "实测无参 13,889 行中有 7,517 行是 1990~2014 的历史更名",
     },
     "stock_company": {
-        "kind": "by_year", "p": "P3", "desc": "公司基本信息",
-        "est_min": 1, "note": "注册地/员工数/主营业务描述",
+        # ⚠️ 必须用 once + 翻页，**不能**用 by_year：
+        #   公司简介是**静态数据**，按年分段会把同一份记录重复 12 次
+        #   （实测 75,528 行 = 6,294 只 × 12 年，去重后只剩 6,294 行）。
+        "kind": "once", "p": "P3", "desc": "公司基本信息",
+        "est_min": 1,
+        "note": "注册地/员工数/主营业务描述（business_scope 是长文本，文件约 76MB）",
     },
     "stk_managers": {
         "kind": "once", "p": "P3", "desc": "高管持股",
