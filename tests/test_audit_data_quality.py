@@ -89,3 +89,60 @@ class TestCleanReturnsJudgement:
         px = _panel("sz000001", [10.00, np.nan, 13.00, 13.10])
         clean, bad = audit.clean_returns(px, quoted_prev=px.shift(1), timeline=px)
         assert bool(bad.iloc[2]["sz000001"]) is False   # 10 → 13 是缺口两侧，不是单日 +30%
+
+
+class TestClassifyResiduals:
+    """残留归因的三分类行为：只分形态、成因不硬判、三态分开。"""
+
+    def test_两口径同超限(self) -> None:
+        """未复权 −17%（自身超限幅）⇒ 两口径同超限，成因存疑不下结论。"""
+        q = _panel("sh600000", [10.0] * 7 + [8.3])
+        bad = pd.DataFrame(False, index=q.index, columns=q.columns)
+        bad.iloc[7, 0] = True
+        out = audit.classify_residuals(q, quoted=q, bad=bad)
+        assert out == {"两口径同超限": 1, "仅复权口径超限": 0, "无法判定": 0}
+
+    def test_仅复权口径超限(self) -> None:
+        """除权日：报价 −0.6% 在限内、复权含分红 −12% ⇒ 仅复权口径超限。"""
+        q = _panel("sh600095", [10.0] * 6 + [9.94, 9.88])
+        adj = _panel("sh600095", [10.0] * 6 + [9.94, 8.75])
+        bad = pd.DataFrame(False, index=q.index, columns=q.columns)
+        bad.iloc[7, 0] = True
+        out = audit.classify_residuals(adj, quoted=q, bad=bad)
+        assert out == {"两口径同超限": 0, "仅复权口径超限": 1, "无法判定": 0}
+
+    def test_无法判定单列(self) -> None:
+        """当日未复权收益缺失 ⇒ 无法判定，不并入另两类（Q10）。"""
+        q = _panel("sh600095", [10.0] * 6 + [9.94, np.nan])
+        adj = _panel("sh600095", [10.0] * 6 + [9.94, 8.75])
+        bad = pd.DataFrame(False, index=q.index, columns=q.columns)
+        bad.iloc[7, 0] = True
+        out = audit.classify_residuals(adj, quoted=q, bad=bad)
+        assert out == {"两口径同超限": 0, "仅复权口径超限": 0, "无法判定": 1}
+
+    def test_上市首日不进归因(self) -> None:
+        """首日标记由 n_first_day 单列，不重复计进三分类。"""
+        q = _panel("sh600000", [10.0] * 7 + [8.3])
+        bad = pd.DataFrame(False, index=q.index, columns=q.columns)
+        bad.iloc[0, 0] = True
+        bad.iloc[7, 0] = True
+        out = audit.classify_residuals(q, quoted=q, bad=bad)
+        assert sum(out.values()) == 1
+
+    def test_分类计数守恒(self) -> None:
+        """三类计数之和 = 非首日的残留条数，不多不少。"""
+        idx = pd.date_range("2024-01-02", periods=8, freq="B")
+        q = pd.DataFrame(
+            {
+                "sh600000": [10.0] * 7 + [8.3],           # → 两口径同超限
+                "sh600095": [10.0] * 6 + [9.94, 9.88],    # → 仅复权口径超限
+                "sz000001": [10.0] * 6 + [10.0, np.nan],  # → 无法判定
+            },
+            index=idx,
+        )
+        adj = q.copy()
+        adj.iloc[7, 1] = 8.75                              # sh600095 复权分红跳变
+        bad = pd.DataFrame(False, index=idx, columns=q.columns)
+        bad.iloc[7, :] = True
+        out = audit.classify_residuals(adj, quoted=q, bad=bad)
+        assert out == {"两口径同超限": 1, "仅复权口径超限": 1, "无法判定": 1}
