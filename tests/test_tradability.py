@@ -218,6 +218,66 @@ class TestCoverageReport:
         txt = coverage_report(close, up)
         assert "0.000%" in txt
 
+    def test_指数列不得混入板块统计(self):
+        """⚠️⚠️ **本组测试的还原验证实测过**（2026-10-06）：
+        把 `ok_cols` 改回「不排除零覆盖列」，本测试**会失败**，
+        而 `test_能区分真封板与缺数据` **照样通过**——
+        因为 `true_limit` 内部已有 `& both`，封板率算不出差别。
+        ⇒ 后者是**橡皮章测试**：看着在验证覆盖率口径，实际验证不了。
+
+        真实缺陷（2026-10-06 实测）：`bar_daily` 里混着 2,862 列指数
+        （sh000001、sh000300…），指数**永远没有涨跌停价**。
+        而本函数按 `startswith('sh')` 分组，于是指数全被算进「沪主板」：
+          沪主板 4,181 只 → 涨停价覆盖率被拉到 **52.24%**（真值 97.8%），
+        看起来像「数据烂了一半」，实际是**分母混了不该有的东西**。
+        ⚠️ 与 P16（分组排名方向）同类：代码能跑、有输出，
+           但统计的对象不是你要研究的对象。
+
+        判据：沪深主板的「只数」必须等于**有涨跌停价的**沪深股票数，
+        指数不计入。
+        """
+        idx = pd.to_datetime(["2023-01-03", "2023-01-04"])
+        # 2 只真实沪市A股 + 5 列指数（sh000001 / sh000300 等）
+        cols = ["sh600001", "sh600002",
+                "sh000001", "sh000300", "sh000905", "sh000016", "sh000852"]
+        close = pd.DataFrame(10.0, index=idx, columns=cols)
+        # 只有两只真实股票有涨跌停价，指数列全缺
+        up = pd.DataFrame(11.0, index=idx, columns=cols[:2])
+
+        txt = coverage_report(close, up, "test")
+
+        # 零覆盖列必须被显式报出
+        assert "零涨跌停价列" in txt, f"未报出零覆盖列:\n{txt}"
+        assert "5/7" in txt, f"零覆盖列数应为 5/7:\n{txt}"
+
+        # ⚠️ **核心判据**：沪主板只数必须是 2（真实股票），不是 7（含指数）
+        line = [ln for ln in txt.splitlines() if "沪主板" in ln][0]
+        assert "2 只" in line, (
+            f"指数列被算进沪主板了（应为 2 只）:\n{line}")
+        # 覆盖率必须是 100%（真实股票全覆盖），不是被指数拉低的 28.6%
+        assert "100.00%" in line, (
+            f"沪主板覆盖率被指数列拉低（应为 100.00%）:\n{line}")
+
+    def test_板块全零覆盖必须报警而非静默(self):
+        """⚠️ 上一条的**副作用约束**：排除零覆盖列后，
+        若某板块**全部**零覆盖，不能静默消失 —— 必须显式报警。
+
+        背景：北交所 `stk_limit` 覆盖不全是真实存在的问题。
+        若改代码时顺手把零覆盖列全filter 掉，
+        `coverage_report` 就不再报警 ⇒ 恰好丢掉了它存在的意义。
+        """
+        idx = pd.to_datetime(["2023-01-03"])
+        cols = ["sh600001", "bj920001", "bj920002"]
+        close = pd.DataFrame(10.0, index=idx, columns=cols)
+        up = pd.DataFrame(11.0, index=idx, columns=["sh600001"])  # 北交所全缺
+
+        txt = coverage_report(close, up, "test")
+        bj_lines = [ln for ln in txt.splitlines() if "北交所" in ln]
+        assert bj_lines, f"北交所行消失了 —— 缺数据不再报警:\n{txt}"
+        assert "0.00%" in bj_lines[0], (
+            f"北交所全零覆盖必须报出 0.00%:\n{bj_lines[0]}")
+        assert "未覆盖" in bj_lines[0] or "只" in bj_lines[0]
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
