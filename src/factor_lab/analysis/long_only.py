@@ -38,6 +38,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from factor_lab.analysis.selection import rank_topk, select_with_buffer
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
@@ -252,15 +254,15 @@ def build_long_only(
     is_rebal[rebal_idx] = True
 
     fv_for_top = np.where(np.isnan(fv_mat), -np.inf, fv_mat)
-    if n_pick >= N:
-        top_idx = np.argsort(-fv_for_top, axis=1)[:, :n_pick]
-    else:
-        part = np.argpartition(-fv_for_top, n_pick - 1, axis=1)[:, :n_pick]
-        rows_idx = np.arange(T)[:, None]
-        order = np.argsort(-fv_for_top[rows_idx, part], axis=1)
-        top_idx = part[rows_idx, order]
+    # ⚠️ **候选池 + 缓冲带**（2026-10-06 修复）
+    #   初版是 `held_mat = top_idx[:, :n_hold]` —— top_idx 已降序排好，
+    #   前 n_hold 个元素与 n_pick 毫无关系，**n_pick 是死参数**。
+    #   实测 n_pick ∈ {20,60,200} 三组持仓逐位完全相同，
+    #   参数扫描表「候选池大小」那一列数值一模一样 —— 那是假象。
+    #   现在真正实现缓冲带语义：持仓股只要还在 top n_pick 内就不卖。
+    top_idx = rank_topk(fv_for_top, n_pick)
+    held_mat = select_with_buffer(top_idx, is_rebal, n_hold)
 
-    held_mat = top_idx[:, :n_hold]                       # (T, n_hold)
     inv = np.where(vol_mat > 0, 1.0 / vol_mat, np.nan)
     picked_inv = np.take_along_axis(inv, held_mat, axis=1)
     bad = ~np.isfinite(picked_inv) | (picked_inv <= 0)
@@ -277,8 +279,10 @@ def build_long_only(
     w_mat = np.clip(w_mat, spec.min_weight, spec.max_weight)
     w_mat = w_mat / w_mat.sum(axis=1, keepdims=True)
 
-    # 非调仓日**沿用上一期持仓**（不重新选股）
-    held_mat = _carry_forward(held_mat, is_rebal)
+    # 非调仓日**沿用上一期权重**。
+    # ⚠️ held_mat **不要**再 carry_forward —— select_with_buffer 内部已经
+    #   在非调仓日填了上一期的持仓，再做一次是重复（虽幂等，但会让人
+    #   误以为缓冲带没生效）。
     w_mat = _carry_forward(w_mat, is_rebal)
     # 首个调仓日之前无持仓 → 全零
     first = int(np.argmax(is_rebal)) if is_rebal.any() else T

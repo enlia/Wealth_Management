@@ -174,8 +174,13 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
             # compute_factor 返回 MultiIndex(date, asset) —— 层名是 asset
             acc[f].append(s.unstack("asset").sort_index())
         del long
-        print(f"    {y}: 原始 {n_rows:>11,} 行，"
-              f"因子面板 {sum(len(x) for x in acc.values()):>12,} 格")
+        # ⚠️ **不能用 len(DataFrame)** 算「格数」——
+        #   len(df) 返回的是**列数**，单因子面板永远打印「1 格」。
+        #   实测踩过：面板实际有 2,600 日期 × 5,600 只 = 1,460 万格，
+        #   打印却是「1 格」，一度被误判为「面板损坏、跨年拼接失效」。
+        #   必须用 shape 显式相乘。
+        n_cells = sum(x.shape[0] * x.shape[1] for x in acc.values())
+        print(f"    {y}: 原始 {n_rows:>11,} 行，因子面板 {n_cells:>12,} 格")
 
     out = {}
     for f, parts in acc.items():
