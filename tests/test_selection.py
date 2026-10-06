@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "research" / "scripts"))
 ROOT = Path(__file__).resolve().parents[1]
 
+from run_financial_study import pick_sample  # noqa: E402
+from run_long_only import WARMUP_TRADING_DAYS, _shift_date, build_panel  # noqa: E402
+
 from factor_lab.analysis.selection import (  # noqa: E402
     rank_topk,
     select_with_buffer,
@@ -24,8 +27,6 @@ from factor_lab.analysis.selection import (  # noqa: E402
 from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
 from factor_lab.data import all_codes  # noqa: E402
 from factor_lab.factors.price_volume import FACTORY, compute_factor  # noqa: E402
-from run_financial_study import pick_sample  # noqa: E402
-from run_long_only import WARMUP_TRADING_DAYS, _shift_date, build_panel  # noqa: E402
 
 
 def _sample_codes(n: int = 150) -> list[str]:
@@ -233,7 +234,6 @@ class TestWarmupWindow:
         # 从注册表里挖出所有窗口参数的最大值
         src = (ROOT / "src" / "factor_lab" / "factors"
                / "price_volume.py").read_text(encoding="utf-8")
-        nums = [int(m) for m in re.findall(r'FACTORY.*?(\d+)', src)]
         reg = re.search(r"FACTORY.*?\n\}", src, re.S)
         assert reg, "读不到 FACTORY"
         windows = [int(m) for m in

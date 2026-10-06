@@ -18,13 +18,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
-from factor_lab.factors.price_volume import compute_factor  # noqa: E402
 from long_only_data import (  # noqa: E402
     WARMUP_TRADING_DAYS,
     _shift_date,
     dedupe_long,
     load_long_chunked,
 )
+
+from factor_lab.factors.price_volume import compute_factor  # noqa: E402
 
 
 def assemble_frames(parts: list[pd.DataFrame], label: str) -> pd.DataFrame:
