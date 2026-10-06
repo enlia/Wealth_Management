@@ -116,8 +116,16 @@ class TestMoneyWhitelist:
         assert NOT_MONEY_PATTERNS.search("total_share")
 
     def test_白名单文件存在(self) -> None:
-        """缺失必须 raise —— 静默用空列表会让人以为「已经换算过了」。"""
+        """缺失必须 raise —— 静默用空列表会让人以为「已经换算过了」。
+
+        ⚠️ `runtime/tushare/` 是下载/推导出的**本地产物**（不进 git）：
+        整个产物目录都不存在时跳过（CI 干净环境、未跑过下载的环境）；
+        目录在、白名单却缺失 = 真缺陷，仍按原判据失败。
+        """
         from merge_tushare_tables import WHITELIST_FILE
+        if not WHITELIST_FILE.parent.exists():
+            pytest.skip(f"缺 {WHITELIST_FILE.parent}（本地产物不进 git），"
+                        "无产物环境跳过")
         assert WHITELIST_FILE.exists(), (
             f"白名单不存在：{WHITELIST_FILE}\n"
             f"  解决：uv run python research/scripts/build_money_whitelist.py")
@@ -126,6 +134,9 @@ class TestMoneyWhitelist:
         import json
 
         from merge_tushare_tables import WHITELIST_FILE
+        if not WHITELIST_FILE.exists():
+            pytest.skip(f"缺 {WHITELIST_FILE}（本地产物不进 git），"
+                        "无产物环境跳过")
         wl = json.loads(WHITELIST_FILE.read_text(encoding="utf-8"))
         for cols in wl.values():
             for c in cols:
