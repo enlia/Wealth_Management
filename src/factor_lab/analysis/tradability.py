@@ -132,31 +132,55 @@ def load_limit_panel(limit_path: Path, start: str, end: str,
 
 
 def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
-                tol: float = 1e-6) -> tuple[pd.DataFrame, pd.DataFrame]:
+                tol: float = 1e-6,
+                unlisted_state: str = "tradable") -> tuple:
     """判定「封涨停」与「封跌停」。
 
     参数
     ----
     close : **未复权**收盘价面板 (日期 × 代码)
     up/dn : `stk_limit` 的原始涨跌停价面板（未复权口径）
+    unlisted_state : `close` 为 NaN 时怎么判。**这是全项目最容易被忽略的口径分叉**。
+
+       ⚠️⚠️ **`close` 缺失有两种截然不同的成因，处理方式必须不同**：
+       | 成因 | 占比（实测 2016-2026 全市场） | 正确处理 |
+       |---|---|---|
+       | **未上市 / 已退市** | 主体 | 不可交易，但**不该被当成"封板"** |
+       | **停牌**（当日有票但无成交） | 少量 | 不可交易（真的动不了） |
+
+       实测把两者混为一谈的后果（2026-10-06 全市场对照）：
+       - 判「买不进 27.45% / 卖不掉 26.78%」，而**真封涨停只有 1.11%、真封跌停 0.43%**
+       - 26.34% 的「不可交易」纯粹是「这只票当时还没上市或已经退市」
+       - ⚠️ **退市股会被永久锁仓**：`sell_ok` 恒为 False ⇒ 卖出端强制保留
+         ⇒ 组合里出现一只**永不消失的僵尸持仓**，其收益被
+         `nan_to_num` 填成 0⇒ 组合收益被稀释，且**换手被压低**
+       - 实测「有约束」版本年化反而**上升** +1.20%/+1.38%/+1.95%
+         —— 这不是约束带来的收益，是**约束把股票池悄悄缩小了**。
+
+       ⇒ 默认 `unlisted_state="tradable"`：**没数据 = 不视为封板**。
+         理由：未上市/已退市在因子层面本来就有因子值 NaN，
+         不会被选进候选池（`rank_topk` 把 NaN 排到末尾）；
+         **在选股层额外判一遍「不可买」是重复劳动，且引入上面那个bug。**
+         若调用方确实要把「缺数据」也当不可交易（如手工指定股票池），
+         传 `unlisted_state="blocked"`，但**必须同时处理退市股的退出**。
 
     ⚠️ **close 必须是未复权价**，不能用 close_adj。
-       实测：`sh600519` 2024-01-02 收盘 1685.01、后复权 1531.31，
+       实测：`sh600519` 2024-01-02 收盘 1685.01、前复权 1531.31，
        复权因子 0.9088 —— 两者差 9%，而涨停判定阈值是 0.01 元级。
-       拿后复权价比原始涨跌停价，**几乎所有股票都判成「未封板」**：
+       拿前复权价比原始涨跌停价，**几乎所有股票都判成「未封板」**：
        约束彻底失效却不报任何错，是最隐蔽的静默 fallback。
-       要用后复权价，必须先把涨跌停价也乘上同一复权因子。
+       要用前复权价，必须先把涨跌停价也乘上同一复权因子。
 
-    ⚠️ **NaN 必须当「不可交易」而不是「未封板」**。
-       NaN 有两种来源：该股未上市/已退市，或 stk_limit 未覆盖。
-       一律填 False 会让「没数据的票」变成可随意买卖 —— 恰恰相反。
-       故此处填 **True**（视为封板 = 不可交易），宁可少买不可乱买。
+    ⚠️ **不能只靠 fillna**：`close >= NaN` 返回 False（不是 NaN），
+       实测导致 fillna(True) 永不触发——
+       涨跌停价缺失的格子被当成「未封板」= 可随意买卖。
+       连fillna 的兜底都失效，比填 False 更隐蔽。
 
     ⚠️ **必须做口径自检**（review 实测）：
-       传错close 时全表 NaN → `fillna(True)` → **所有股票都判为不可交易**，
+       传错close 时全表 NaN → 一律判不可交易 ⇒ **所有股票都不可买**，
        结果是「一只都买不了」，而代码不报任何错。
        实测两种错法的表现：
-         传后复权价→ 封涨停率 0.79% 稀释到 0.25%（静默削弱 2/3）
+         传前复权价→ 封涨停率 0.79% 稀释到 0.25%（静默削弱 2/3）
          面板未对齐 → 封涨停率 0.00%（约束彻底失效）
        故覆盖率过低时直接抛错，把静默失效变成显式失败。
 
@@ -169,9 +193,12 @@ def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
           `ValueError: Can only compare identically-labeled`；
           而手动 reindex 兜底又大概率对不上 → 全部判成不可交易
 
-    故此处**统一 reindex 到 close 的形状**，并校验覆盖率。
-    reindex 后缺失的格子走「不可交易」，语义正确。
+       故此处**统一 reindex 到 close 的形状**，并校验覆盖率。
     """
+    if unlisted_state not in ("tradable", "blocked"):
+        raise ValueError(
+            f"unlisted_state 只能是 'tradable' / 'blocked'，"
+            f"收到 {unlisted_state!r}")
     up = up.reindex(index=close.index, columns=close.columns)
     dn = dn.reindex(index=close.index, columns=close.columns)
     cov_close = float(close.notna().to_numpy().mean())
@@ -183,12 +210,46 @@ def limit_masks(close: pd.DataFrame, up: pd.DataFrame, dn: pd.DataFrame,
             f"up 索引 {type(up.index).__name__}\n"
             f"  ⚠️ 若继续执行，缺数据会被判为「不可交易」"
             f"（可能一只都买不了）且不报错。")
-    # ⚠️ **不能只靠 fillna**：`close >= NaN` 返回 False（不是 NaN），
-    #   实测导致 fillna(True) 永不触发 ——
-    #   涨跌停价缺失的格子被当成「未封板」= 可随意买卖。
-    #   连fillna 的兜底都失效，比填 False 更隐蔽。
-    limit_up = (close >= up - tol) | close.isna() | up.isna()
-    limit_dn = (close <= dn + tol) | close.isna() | dn.isna()
+    # ⚠️⚠️ **「缺涨跌停价」必须先限定在「当日确实有 close」范围内**
+    #   （2026-10-06 实测 BLOCK，review 后修复）：
+    #
+    #   初版是无条件封板：
+    #       no_px = up.isna() | dn.isna()
+    #       limit_up = (close >= up - tol) | no_px
+    #
+    #   而 Tushare `stk_limit` **在股票未上市/ 已退市的日子里本来就没有行**，
+    #   ��此「未上市」⇒ `up` 为 NaN ⇒ `no_px=True` ⇒ **照样被判封涨停**。
+    #   ⇒ `unlisted_state="tradable"` 这条修复**根本没机会生效**：
+    #     它只管「有涨跌停价但无 close」，而未上市这个主体场景
+    #     在更早的 `no_px` 分支就被拦下了。
+    #
+    #   实测（2016-2026 全市场 A 股 5,921 只 × 2,611 日 = 1,546 万格）：
+    #
+    #   | 口径| 买不进 | 卖不掉 |
+    #   |---|---|---|
+    #   | 初版（no_px 无条件） | **27.817%** | **27.179%** |
+    #   | 修正版（no_px & 有 close） | **1.164%** | **0.526%** |
+    #   | 真实封板强度 | 1.048% | 0.410% |
+    #
+    #   `no_px` 的 4,138,520 格里有 **99.6%** 是「close 也缺失」
+    #   （未上市/已退市），只有 0.116% 是真正的上市期间数据空洞。
+    #   ⇒ 把前者一并封掉，等于凭空多阻塞 26.77pp，
+    #     后果与 BLOCK-2 声称修复的完全相同：退市股僵尸锁仓 + 股票池缩小。
+    #
+    #   修正后买不进 1.164% 与真实封板 1.048% 只差 0.12pp —— 口径自洽。
+    no_px_all = up.isna() | dn.isna()
+    # 只在「本来就有成交」的地方谈涨跌停：
+    # 有 close 但缺价= 真数据空洞 ⇒ 保守判不可交易（安全的一侧）
+    # 无 close ⇒ 未上市/已退市 ⇒ 交给 unlisted_state 决定，不在此处封板
+    no_px = no_px_all & close.notna()
+    limit_up = (close >= up - tol) | no_px
+    limit_dn = (close <= dn + tol) | no_px
+    if unlisted_state == "blocked":
+        # 调用方显式要求「缺 close 也算不可交易」。
+        # ⚠️ 此时退市股会被永久锁仓（sell_ok 恒 False），
+        #   调用方**必须**自行处理退出，否则组合里会出现僵尸持仓。
+        limit_up = limit_up | close.isna()
+        limit_dn = limit_dn | close.isna()
     return limit_up.fillna(True), limit_dn.fillna(True)
 
 
@@ -212,9 +273,34 @@ def coverage_report(close: pd.DataFrame, up: pd.DataFrame,
              f"{close.shape[1]:,} 只）"]
     lines.append(f"  整体覆盖率up {up2.notna().to_numpy().mean():.2%}"
                  f" / close {close.notna().to_numpy().mean():.2%}")
+    # ⚠️⚠️ **零覆盖列必须单独报出来，不能混进分板块统计**（2026-10-06 实测）：
+    #   `bar_daily` 不只有 A 股，还有指数（sh000001、sh000300…）。
+    #   指数**永远没有涨跌停价**，而本函数按 `startswith('sh')` 分组——
+    #   2,862 列指数被当成「沪主板」，把沪主板涨停价覆盖率
+    #   从97.8% 拉低到 **52.2%**，看起来像「数据烂了一半」。
+    #   实际是口径错误：**分母里混了不该有的东西**。
+    #   ⚠️ 与 P16（分组排名方向）同类：代码能跑、有输出，
+    #      但统计的对象不是你要研究的对象。
+    #
+    #   ⚠️ **但零覆盖列不能从报告里删掉**（review 抓出）：
+    #   北交所 `stk_limit` 覆盖不全，零覆盖列**恰恰是最该报警的信号** ——
+    #   删掉它这份报告就变成「一切正常」，正好丢掉它的存在意义。
+    #   ⇒ 折中：**分板块统计排除零覆盖列**，同时**单独报出零覆盖列数**
+    #     与占比，让「指数混入」与「北交所缺数据」两种原因可区分。
+    zero_cols = [c for c in per_col.index if float(per_col[c]) <= 0]
+    lines.append(f"  零涨跌停价列 {len(zero_cols):,}/{close.shape[1]:,} "
+                 f"({len(zero_cols)/max(close.shape[1],1):.1%})"
+                 f" —— 已从下方分板块统计中排除"
+                 f"（成因：指数/基金混入，或该板块 stk_limit 未覆盖）")
+    if zero_cols:
+        lines.append(f"    样例: {list(zero_cols[:3])}")
+    ok_cols = [c for c in per_col.index if float(per_col[c]) > 0]
     for pre, name in (("sh", "沪主板"), ("sz", "深市"), ("bj", "北交所")):
-        cols = [c for c in per_col.index if str(c).startswith(pre)]
+        cols = [c for c in ok_cols if str(c).startswith(pre)]
         if not cols:
+            lines.append(f"  {name:<6} {0:>5} 只  涨停价覆盖率  0.00%  "
+                         f"真封涨停率  0.000%  "
+                         f"⚠ 该板块全部零覆盖，stk_limit 未覆盖")
             continue
         sub = per_col[cols]
         sub_true = true_limit[cols].to_numpy().mean()

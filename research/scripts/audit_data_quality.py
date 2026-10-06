@@ -32,7 +32,8 @@
 ----------
   audit_price_data()      价格数据体检，输出污染规模与影响量级
   clean_returns()         清洗收益率：剔除上市首日 + 标记未复权除权日
-  judge_limit()           按板块判定当日涨跌幅是否合法
+  judge_limit_rules()     按 market_rules 判定超限（价格感知容差 + 新股窗口）
+  classify_residuals()    残留超限按形态三分类计数（成因不硬判）
 
 判定「是否修好了」的口径（重要）
 --------------------------------
@@ -40,11 +41,11 @@
 它衡量的是**污染的潜在影响量级**，而不是「复权修好了没有」。
 
   · 对**未复权**价格：annual_drag ≈ −2.365pp/年（污染确实存在）
-  · 对**后复权**价格：超限记录应降到 ~0，annual_drag 也应趋近 0
+  · 对**前复权**价格：超限记录应降到 ~0，annual_drag 也应趋近 0
 
 所以审计必须能分别读两个字段。本脚本用 ``--field`` 控制：
   --field close      未复权（默认，体检用）
-  --field close_adj  后复权（修好后回归验证用）
+  --field close_adj  前复权（修好后回归验证用）
 
 ⚠️ 若`--field close_adj` 的异常数与`--field close` 几乎一样，
 说明并库没生效，不要通过调大容差来「修复」。
@@ -68,37 +69,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from factor_lab.config import is_a_share
 from factor_lab.data import all_codes, load_prices
-from factor_lab.market_rules import limit_of, no_limit_days, price_tolerance
+from factor_lab.market_rules import (
+    board_of,
+    limit_of,
+    no_limit_days,
+    price_tolerance,
+)
 
-# 各板块的日涨跌幅限制（2026 年现行）
-LIMIT = {
-    "main": 0.10,       # 沪深主板
-    "gem": 0.20,       # 创业板 sz30
-    "star": 0.20,      # 科创板 sh688
-    "bse": 0.30,       # 北交所 bj
-}
-TOL = 1.005# 容差：涨跌停价按四舍五入，留 0.5% 缓冲
-
-
-def board_of(code: str) -> str:
-    """按代码段判定板块。"""
-    c = str(code)
-    if c.startswith("sz30"):
-        return "gem"
-    if c.startswith("sh688"):
-        return "star"
-    if c.startswith("bj"):
-        return "bse"
-    return "main"
-
-
-def judge_limit(code: str, ret: pd.Series) -> pd.Series:
-    """判断某股票每日收益是否超出该板块的涨跌幅限制。
-
-    超限即说明该日数据异常（未复权除权 / 数据错误 / 上市首日）。
-    """
-    lim = LIMIT[board_of(code)] * TOL
-    return ret.abs() > lim
+# ⚠️ 板块判定、限幅表与容差**只有 market_rules 一份实现**（统一入口）。
+#    本脚本曾内置第二套 board_of / LIMIT / 固定容差 TOL=1.005：
+#    与 market_rules 双实现并存必然漂移 —— 本地 board_of 按前缀切片把
+#    sh689009（科创板 CDR）判成主板 ±10%，固定容差把低价股真实封板
+#    误判成超限（Q2 实测误判率 87%），均已证伪。此处统一引用 market_rules。
 
 
 def judge_limit_rules(
@@ -120,7 +102,7 @@ def judge_limit_rules(
        ``min(lim*TOL, …)`` 这类近似代替price_tolerance。
 
        涨跌幅限制是交易所对**报价**的约束，与复权无关。
-       实测：若用后复权价算容差，北交所某票后复权价恒为 1.30 元，
+       实测：若用前复权价算容差，北交所某票前复权价恒为 1.30 元，
        容差被算成 30.00%，而其真实涨幅恰为 +30.000%（合法封板）却被判超限；
        创业板/科创板异常数虚增近 4 倍（65 → 252 条/600 只·1 年），
        会得出「复权反而使污染变多 4 倍」的反向结论。
@@ -154,10 +136,27 @@ def judge_limit_rules(
     return pd.Series(over, index=ret.index)
 
 
+def _trade_day_index(
+    timeline: pd.DataFrame, prices: pd.DataFrame, code: str, index: pd.Index,
+) -> tuple[pd.Series, int | None]:
+    """按【未复权】时间线算交易日序号（1 起）与首个行情日（YYYYMMDD）。
+
+    ⚠️ 序号与首个行情日必须取自未复权时间线（timeline），不能用被审字段
+       自身：它有 NULL 时位置整体错位，会把新股无限幅窗口判到错误的日期上，
+       实测让异常数从 112 条虚高到 11,183 条（100 倍）。
+    """
+    src = timeline if code in timeline else prices
+    valid = src[code].dropna().index
+    pos = {d: i + 1 for i, d in enumerate(valid)}
+    tdi = pd.Series([pos.get(d, 1) for d in index], index=index)
+    # 首个行情日（YYYYMMDD），用于判断是否适用注册制新股 5 日窗口
+    fd = int(valid[0].strftime("%Y%m%d")) if len(valid) else None
+    return tdi, fd
+
+
 def clean_returns(
     prices: pd.DataFrame,
     quoted_prev: pd.DataFrame | None = None,
-    use_rules: bool = False,
     timeline: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """清洗收益率，返回 (干净收益率, 异常标记)。
@@ -169,10 +168,9 @@ def clean_returns(
     参数
     ----
     prices : 被检验的价格面板（``close`` 或 ``close_adj``）
-    quoted_prev : **未复权**前收盘价面板。``use_rules=True`` 时必须传入，
-        否则容差基准错误（见 ``judge_limit_rules`` 的警告）。
-        缺省退化为 ``prices.shift(1)``，仅当 prices 本身就是报价时才正确。
-    use_rules : True 时用 market_rules 的价格感知容差 + 新股窗口判定。
+    quoted_prev : **未复权**前收盘价面板，必须传入（缺省退化为
+        ``prices.shift(1)``，仅当 prices 本身就是报价时才正确）。
+        涨跌停容差基准必须是**未复权**前收，见 ``judge_limit_rules`` 的警告。
     timeline : **未复权**价格面板，仅用于确定「交易日序号」与首个行情日。
         ⚠️ 检验 ``close_adj`` 时**必须**传入：
         close_adj 有 NULL（1.6% 的 A 股行）时，用它自己的非空位置算序号会
@@ -195,18 +193,9 @@ def clean_returns(
         r = ret[c].dropna()
         if len(r) == 0:
             continue
-        if use_rules:
-            pc = prev_close[c].reindex(r.index)
-            # 交易日序号用**未复权时间线**（timeline），不用 close_adj 自身：
-            # 后者有 NULL 时位置会错位，把新股窗口判到错误的日期上。
-            valid = tl[c].dropna().index if c in tl else prices[c].dropna().index
-            pos = {d: i + 1 for i, d in enumerate(valid)}
-            tdi = pd.Series([pos.get(d, 1) for d in r.index], index=r.index)
-            # 首个行情日（YYYYMMDD），用于判断是否适用注册制新股 5 日窗口
-            fd = int(valid[0].strftime("%Y%m%d")) if len(valid) else None
-            over = r.index[judge_limit_rules(c, r, pc, tdi, fd).to_numpy()]
-        else:
-            over = r.index[r.abs() > LIMIT[board_of(c)] * TOL]
+        pc = prev_close[c].reindex(r.index)
+        tdi, fd = _trade_day_index(tl, prices, c, r.index)
+        over = r.index[judge_limit_rules(c, r, pc, tdi, fd).to_numpy()]
         if len(over):
             # ⚠️ 必须用 .loc[index, col] 逐列赋值。
             #    若 over 为空 Index，`bad.loc[empty_index, c] = True`
@@ -216,22 +205,75 @@ def clean_returns(
     return ret.mask(bad), bad
 
 
+def classify_residuals(
+    prices: pd.DataFrame,
+    quoted: pd.DataFrame,
+    bad: pd.DataFrame,
+    quoted_prev: pd.DataFrame | None = None,
+    timeline: pd.DataFrame | None = None,
+) -> dict[str, int]:
+    """把「规则内超限」残留逐条按**形态**分三类计数（Q10：三态分开）。
+
+    只做形态分类，**不做成因定性** —— 成因要在公司行为记录上逐条核对，
+    库内暂无逐日公司行为明细（ts_income 的分红是期值不是逐日事件）。
+
+    ``两口径同超限``
+        当日**未复权**口径在同一判定链（judge_limit_rules）下也超限。
+        已知反例边界：「除权跳空残留 + 复权因子缺失」正是**复权失败**的一种
+        形态，与「源数据报价错误」在行情数据内不可区分 —— 故此形态只能记
+        「成因存疑」，**不得**据此断言「属源数据错误、非复权失败」。
+    ``仅复权口径超限``
+        当日未复权口径在限内、仅前复权口径超限 ⇒ 复权因子当日有跳变
+        （分红/送转计入），与「除权日总收益按规则略超报价限幅」一致
+        （sh600095 2021-05-26 形态：复权收益 +10.02%、报价涨幅 +9.40%，
+        差额即当日分红收益率）。
+        已知反例边界：复权因子过矫、重复计入分红也呈此形态。
+    ``无法判定``
+        当日未复权收益算不出（相邻报价缺失），单列不并入前两类（Q10）。
+
+    上市首日不属归因对象（由 n_first_day 单列）。
+    """
+    ret_q = quoted.pct_change(fill_method=None)
+    prev_close = quoted.shift(1) if quoted_prev is None else quoted_prev
+    tl = quoted if timeline is None else timeline
+    counts = {"两口径同超限": 0, "仅复权口径超限": 0, "无法判定": 0}
+    for c in prices.columns:
+        flagged = bad.index[bad[c].to_numpy()]
+        if not len(flagged):
+            continue
+        s = prices[c].dropna()
+        first = s.index[0] if len(s) else None
+        r = ret_q[c].dropna()
+        pc = prev_close[c].reindex(r.index)
+        tdi, fd = _trade_day_index(tl, prices, c, r.index)
+        over_q = judge_limit_rules(c, r, pc, tdi, fd)
+        for d in flagged:
+            if first is not None and d == first:
+                continue                    # 上市首日单列（n_first_day）
+            if d not in r.index:
+                counts["无法判定"] += 1      # 当日未复权收益缺失
+            elif bool(over_q[d]):
+                counts["两口径同超限"] += 1
+            else:
+                counts["仅复权口径超限"] += 1
+    return counts
+
+
 def audit_price_data(
     prices: pd.DataFrame,
     verbose: bool = True,
-    use_rules: bool = True,
     quoted_prev: pd.DataFrame | None = None,
     timeline: pd.DataFrame | None = None,
 ) -> dict:
     """价格数据体检。
 
-    use_rules=True（默认）用 ``market_rules`` 的价格感知容差 + 新股窗口判定。
+    判定走 ``market_rules`` 的价格感知容差 + 新股窗口（统一入口，无第二套口径）。
     quoted_prev / timeline 为**未复权**面板；检验 close_adj 时**必须**传入，
-    否则会用后复权价算容差、把合法涨跌停误判成超限。
+    否则会用前复权价算容差、把合法涨跌停误判成超限。
     """
     ret = prices.pct_change(fill_method=None)
     clean, bad = clean_returns(prices, quoted_prev=quoted_prev,
-                               use_rules=use_rules, timeline=timeline)
+                               timeline=timeline)
     n_tot = int(ret.notna().sum().sum())
     n_bad = int(bad.sum().sum())
     abs_all = float(ret.abs().stack().sum())
@@ -284,9 +326,9 @@ def audit_price_data(
         if verbose:
             print()
             print("  ⚠️ 这个差值**不是复权质量指标**。它衡量「把超限日置 NaN 会改变多少」：")
-            print("     · 对未复权价：超限多为假跳空 → 差值大= 污染重")
-            print("     · 对后复权价：超限多为**真实涨跌停**，置 NaN 会漏掉真实收益 →")
-            print("       差值大 = 真实收益被误删，与污染无关")
+            print("     · 对未复权价：超限多为除权假跳空 → 差值大 = 污染重")
+            print("     · 对前复权价：残留超限的成因分类见关卡判定处的运行时三分类，")
+            print("       无论归入哪一类，置 NaN 都会抹掉当日真实收益 → 差值大 ≠ 污染重")
             print("     → 判断复权是否成功，只看 `异常率`，不要看这个差值")
     return out
 
@@ -299,7 +341,7 @@ def main() -> int:
     ap.add_argument("--end", default="2026-09-30")
     ap.add_argument("--field", default="close",
                     choices=["close", "close_adj"],
-                    help="close=未复权（体检）；close_adj=后复权（修好后回归）")
+                    help="close=未复权（体检）；close_adj=前复权（修好后回归）")
     args = ap.parse_args()
 
     codes = [c for c in all_codes() if is_a_share(c)]
@@ -330,7 +372,7 @@ def main() -> int:
     print("逐板块异常分布")
     print("=" * 70)
     _, bad = clean_returns(prices, quoted_prev=quoted_prev,
-                             use_rules=True, timeline=quoted_panel)
+                             timeline=quoted_panel)
     for b in ["main", "gem", "star", "bse"]:
         cols = [c for c in prices.columns if board_of(c) == b]
         if not cols:
@@ -349,17 +391,39 @@ def main() -> int:
     print("关卡判定")
     print("=" * 70)
     if args.field == "close_adj":
-        # 后复权：判据是「规则内超限率」，不是与清洗后的差值。
-        # 实测 99.7% 的残留超限在**未复权原始收益里同样超限** → 是源数据本身的错误，
-        # 不是复权失败（详见 docs/03_项目报告/12_数据修复与因子研究.md）。
+        # 前复权：判据是「规则内超限率」，不是与清洗后的差值。
+        # ⚠️ 残留超限的成因**必须逐条归因，不能假设**；下述计数由
+        #    classify_residuals() 在**本次运行时**算出。一次性快照写死进
+        #    代码/文档正文后，下次重跑就会说谎（「99.7% 源数据错误」与
+        #    「33 条（29.5%）+ 79 条」两版写死数字已先后作废）。
+        #    归因口径、已知反例边界与实测快照见
+        #    docs/03_项目报告/12_价量因子有效性检验报告.md
+        #    （一、数据关卡 · 残留超限归因口径）。
+        att = classify_residuals(prices, quoted=quoted_panel, bad=bad,
+                                 quoted_prev=quoted_prev)
+        n_att = sum(att.values())
         ok = out["pct_bad"] < 0.005
         if ok:
-            print(f"  ✓ 后复权规则内超限率 {out['pct_bad']*100:.3f}% < 0.5%"
+            print(f"  ✓ 前复权规则内超限率 {out['pct_bad']*100:.3f}% < 0.5%"
                   f" → 允许做收益结论")
-            print("    残留超限中约 99.7% 在未复权口径下同样超限，属源数据错误，")
-            print("    已在因子研究阶段用 mask 剔除（见 run_factor_study.py）")
         else:
-            print(f"  ✗ 后复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5% → **禁止收益结论**")
+            print(f"  ✗ 前复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5% → **禁止收益结论**")
+        print(f"    残留超限 {n_att} 条（不含上市首日）按形态分类，成因不硬判：")
+        print(f"      · 两口径同超限   {att['两口径同超限']:>6} 条 —— 成因存疑："
+              f"可能是源数据报价错误，")
+        print("        也可能是除权跳空残留 + 复权因子缺失（后者恰是复权失败的特征之一，")
+        print("        不逐条对照公司行为记录不能定性；已知反例边界："
+              "「未复权也超限」≠「非复权失败」）")
+        print(f"      · 仅复权口径超限 {att['仅复权口径超限']:>6} 条 —— 当日复权因子跳变"
+              f"（分红/送转计入），")
+        print("        与「除权日总收益按规则略超报价限幅」一致"
+              "（sh600095 2021-05-26 形态：复权 +10.02%、报价 +9.40%）；")
+        print("        已知反例边界：复权因子过矫 / 重复计入分红也呈此形态")
+        print(f"      · 无法判定       {att['无法判定']:>6} 条 —— 当日未复权收益缺失，"
+              f"按 Q10 单列，不并入前两类")
+        print("    归因口径与实测快照：docs/03_项目报告/12_价量因子有效性检验报告.md"
+              "（一、数据关卡 · 残留超限归因口径）")
+        print("    因子研究阶段仍用 mask 剔除（见 run_factor_study.py）")
         return 0 if ok else 2
     if out["pct_bad"] >= 0.005:
         print(f"  ⚠️ 未复权超限率 {out['pct_bad']*100:.3f}% ≥ 0.5%，"

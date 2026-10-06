@@ -211,7 +211,7 @@ def main() -> int:
 
 
 def merge_into_db(df: pd.DataFrame, adj: pd.DataFrame) -> int:
-    """把退市股日线 + 后复权收盘价并入 bar_daily。
+    """把退市股日线 + 前复权收盘价并入 bar_daily。
 
     复权算法与 ``merge_tushare_into_db.py`` 完全一致（同一口径，不能两套）：
         close_adj = close × adj_factor(t) / adj_factor(最新交易日)
