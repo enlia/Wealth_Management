@@ -119,7 +119,14 @@ def check_one(name: str, verbose: bool = True) -> dict:
     """校验单个表。返回结构化结果。"""
     f = OUT / f"{name}.parquet"
     if not f.exists():
-        return {"table": name, "status": "缺失", "rows": 0}
+        return {"table": name, "status": "缺失", "rows": 0,
+                "issues": ["文件不存在 —— 该任务尚未下载或下载失败"],
+                # ⚠️ 缺失必须算blocking。早版返回 status="缺失" 但 blocking=False，
+                #    而 main()只按 sus 判退出码 →跑出「通过 22 / 存疑 0」
+                #    却有 25 个任务根本没下载（假绿）。
+                #    ENGINEERING 第四节：一次运行「看起来成功」但实际跳过了
+                #    某些检查，就算违规。
+                "blocking": True}
 
     df = pd.read_parquet(f)
     n = len(df)
@@ -222,8 +229,28 @@ def main() -> int:
         print("\n异常明细：")
         for r in bad:
             print(f"  {r['table']}: {r['status']}")
+
+    # ── 与任务表对账：定义了的任务有没有真的下载？──
+    # ⚠️ 早期版本只校验「已落盘的表」，于是P1/P2 尚未下载时
+    #    依然输出「通过 22 / 存疑 0」，看着像全绿。
+    #    任务表是「应该有什么」的唯一来源，必须对账。
+    try:
+        from tushare_tasks import TASKS
+
+        on_disk = {f.stem for f in files}
+        pending = sorted(n for n in TASKS if n not in on_disk)
+        if pending:
+            print(f"\n⚠ 任务表定义了 {len(pending)} 个任务但尚未下载：")
+            for n in pending:
+                print(f"    {n:<20}{TASKS[n]['p']}  {TASKS[n]['desc']}")
+            print("  下载：uv run python research/scripts/fetch_all_tushare.py"
+                  " --prio P1")
+    except ImportError:
+        print("\n(未找到 tushare_tasks，跳过任务对账)")
+
     print("=" * 88)
-    return 1 if sus else 0
+    # 退出码：存疑或缺失/空表都必须非 0
+    return 1 if (sus or bad) else 0
 
 
 if __name__ == "__main__":
