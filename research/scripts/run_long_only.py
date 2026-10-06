@@ -59,77 +59,12 @@ from factor_lab.config import is_a_share  # noqa: E402
 from factor_lab.data import all_codes  # noqa: E402
 from factor_lab.factors.price_volume import compute_factor  # noqa: E402
 
+# ⚠️ **re-export**：`load_long_chunked` 已搬到 `long_loader.py`（拆行数用），
+#   但 `run_limit_constraint.py` 等仍从本模块导入它。
+from long_loader import load_long_chunked  # noqa: E402
+
 OUTPUT = ROOT / "runtime" / "long_only"
 BENCH = {"300": "399300.SZ"}
-
-
-def load_long_chunked(codes: list[str], start: str, end: str,
-                      years: tuple[int, ...] | None = None,
-                      verbose: bool = True) -> pd.DataFrame:
-    """分年加载后复权价，避免一次性读入撑爆内存。
-
-    ⚠️ **为什么必须分块**：
-    全市场 5,606 只 × 2,611 日 = **1,080 万行 × 9 列**，
-    实测 `load_long` 一次性加载直接
-    `numpy._core._exceptions._ArrayMemoryError: Unable to allocate 742 MiB`。
-    之前「跑 20 分钟」不是慢，是在反复 GC/重试 —— 假象会掩盖真问题。
-
-    做法：按年切片逐年加载，峰值内存降到 1/10。
-    因子计算只要 close_adj（有 OHLC 的因子才追加）。
-    """
-    import sqlite3
-
-    from factor_lab.config import DB_PATH
-
-    if years is None:
-        y0, y1 = int(start[:4]), int(end[:4])
-        years = tuple(range(y0, y1 + 1))
-
-    chunks: list[pd.DataFrame] = []
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    total = 0
-    for y in years:
-        ys, ye = f"{y}0101", f"{y}1231"
-        if ye < start[:8] or ys > end[:8]:
-            continue
-        lo = max(ys, start[:8])
-        hi = min(ye, end[:8])
-        parts = []
-        # 分批取代码，避免单条 SQL 的 IN 列表过长
-        # ⚠️ **列必须按因子声明的依赖取**，不能只取 OHLC。
-        #   实测踩过：volratio5_60 依赖 `vol`、amount20 依赖 `amount`，
-        #   而这里硬编码了 OHLC+close_adj ——
-        #   结果 `KeyError: 'Column not found: vol'`，
-        #   两个因子**从未在滚动检验里跑过**（静默漏测）。
-        #   代价可控：多取两列约增加 15% 内存（约 18MB/百万行）。
-        cols = ["code", "date", "open", "high", "low", "close", "close_adj"]
-        cols += [c for c in ("vol", "amount") if c not in cols]
-        for i in range(0, len(codes), 800):
-            sub = codes[i:i + 800]
-            q = (f"SELECT {', '.join(cols)} "
-                 f"FROM bar_daily WHERE date BETWEEN ? AND ? "
-                 f"AND close_adj IS NOT NULL AND code IN ({','.join('?' * len(sub))})")
-            parts.append(pd.read_sql(q, con, params=[lo, hi, *sub]))
-        if parts:
-            df = pd.concat(parts, ignore_index=True)
-            chunks.append(df)
-            total += len(df)
-            if verbose:
-                print(f"    {y}: {len(df):>10,} 行  累计 {total:>12,}")
-    con.close()
-    if not chunks:
-        return pd.DataFrame()
-    out = pd.concat(chunks, ignore_index=True).sort_values(
-        ["code", "date"], kind="stable")
-    # ⚠️ **必须转 datetime**：`bar_daily.date` 存的是 int（20260104），
-    #   而 `compute_factor` 内部用 `pd.DatetimeIndex(dates)` 构造索引。
-    #   int 被当纳秒时间戳 → 索引变成 1970-01-01 → unstack 后每年只有 1 行。
-    #   实测踩过：因子面板「每年 1 格」，而原始数据明明有 60 万行。
-    #   `load_long` 内部做了同样的转换，这里必须对齐。
-    out["date"] = pd.to_datetime(out["date"], format="%Y%m%d")
-    out["high_adj"] = out["high"] * out["close_adj"] / out["close"]
-    out["low_adj"] = out["low"] * out["close_adj"] / out["close"]
-    return out
 
 
 def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
@@ -165,23 +100,60 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
                                  verbose=False)
         if long.empty:
             continue
-        # 只保留 [ys, ye] 区间内的计算结果
-        # （date 此时已是 datetime —— load_long_chunked 已转换）
-        if "date" in long.columns:
-            lo = pd.Timestamp(ys)
-            hi = pd.Timestamp(ye)
-            long = long[(long["date"] >= lo) & (long["date"] <= hi)]
         n_rows += len(long)
-        # 价格面板（后复权）也要留一份 —— 收益必须从价格算
-        price_parts.append(long.pivot_table(
-            index="date", columns="code", values="close_adj",
-            aggfunc="last").sort_index())
+        # 🔴🔴 **预热数据必须在算因子之后、存结果之前才裁掉**
+        #   （2026-10-06 实测 BLOCK，11 年全部受影响）
+        #
+        #   初版在这里就把 `long` 裁成 [ys, ye]，
+        #   然后才 `compute_factor(f, long)`
+        #   ⇒ 上一年末那 260 个预热交易日**在因子计算前就被丢掉了**。
+        #
+        #   而 `rev5` 的实现是 `px.groupby(code).shift(5)`，
+        #   要的是**同一股票**的前 5 行 ⇒ 每年 1 月开头 5 个交易日
+        #   每只股票的 shift(5) 都是 NaN ⇒ 因子值 100% 缺失。
+        #
+        #   实测（2016-2026 全市场 5,606 只 × 2,611 日）：
+        #       有效因子数 < 100 的天数 = **55 天**
+        #       全部落在每年 **1 月 2 日~ 1 月 10 日**，11 年无一例外
+        #       有效股票数 **min=0 / 中位 4,088**
+        #
+        #   ⇒ 这 55 天里 `rank_topk` 的候选池**全是 NaN 股票**，
+        #     而 `rank_topk` 只把 NaN 排到末尾、仍返回满 k 个
+        #     ⇒ 未上市股照样占持仓槽位（子agent 报的 BLOCK-2）。
+        #
+        #   ⚠️ 本函数 docstring 声称「多读 WARMUP 天前置数据用于预热，
+        #      否则 mov250 在年初会全 NaN」—— **代码与声明不符**
+        #      （CODE_TRUST P23）。实测确实是全 NaN。
+        #
+        #   正解：先算因子（含预热行），再把**结果**裁到 [ys, ye]。
+        #   预热行只参与 rolling/shift 计算，不进入输出面板。
+        keep = None
+        if "date" in long.columns:
+            keep = ((long["date"] >= pd.Timestamp(ys))
+                    & (long["date"] <= pd.Timestamp(ye)))
+        # 价格面板（后复权）也要留一份 —— 收益必须从价格算。
+        # ⚠️ 价格面板**只能**用区间内行：收益是逐日的，
+        #    混入上一年末会造出跨年首日的「伪收益」。
+        if keep is not None:
+            price_parts.append(long[keep].pivot_table(
+                index="date", columns="code", values="close_adj",
+                aggfunc="last").sort_index())
+        else:
+            price_parts.append(long.pivot_table(
+                index="date", columns="code", values="close_adj",
+                aggfunc="last").sort_index())
         for f in factors:
+            # ⚠️ 传**含预热行**的 `long` —— 滚动窗口需要上一年末的数据
             s = compute_factor(f, long)
             if s is None or s.empty:
                 continue
             # compute_factor 返回 MultiIndex(date, asset) —— 层名是 asset
-            acc[f].append(s.unstack("asset").sort_index())
+            wide = s.unstack("asset").sort_index()
+            # 算完再裁掉区间外的行：预热只参与计算，不进输出
+            if keep is not None:
+                wide = wide[(wide.index >= pd.Timestamp(ys))
+                            & (wide.index <= pd.Timestamp(ye))]
+            acc[f].append(wide)
         del long
         # ⚠️ **不能用 len(DataFrame)** 算「格数」——
         #   len(df) 返回的是**列数**，单因子面板永远打印「1 格」。
