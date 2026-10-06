@@ -4,7 +4,7 @@
 
 本脚本做的事
 ------------
-1. **复权**：新增``close_adj`` 列存后复权收盘价，**保留原始 close 不动**
+1. **复权**：新增``close_adj`` 列存前复权收盘价，**保留原始 close 不动**
    close_adj = close × adj_factor(t) / adj_factor(最新交易日)
    → 原始未复权价必须保留：涨跌停判定、真实成交价校验都要用它
 2. **行业**：用申万 index_member_all 补全 stock_info.industry
@@ -103,7 +103,7 @@ def load_adj_factors() -> pd.DataFrame:
 
 
 def merge_adj(con: sqlite3.Connection, dry_run: bool) -> int:
-    """新增 close_adj 列并写入后复权收盘价。"""
+    """新增 close_adj 列并写入前复权收盘价。"""
     print("\n" + "=" * 76)
     print("并库 1：复权修正（新增 close_adj 列，保留原始 close）")
     print("=" * 76)
@@ -129,7 +129,7 @@ def merge_adj(con: sqlite3.Connection, dry_run: bool) -> int:
     print(f"  剔除上市前填充 {dropped:,} 行 →剩 {len(adj):,} 行"
           f"（{adj['code'].nunique():,} 只）")
 
-    # 归一化：后复权 = close × factor(t) / factor(最新)
+    # 归一化：前复权 = close × factor(t) / factor(最新)
     latest = adj.groupby("code")["adj_factor"].last()
     adj["norm"] = adj["adj_factor"] / adj["code"].map(latest)
     adj["value"] = adj["norm"]   # 待乘以 close 的系数
@@ -199,8 +199,8 @@ def _report_factor_sanity(adj: pd.DataFrame) -> None:
     print(f"  归一化系数 norm：min={q['min']:.4f} p1={q['1%']:.4f} "
           f"中位={q['50%']:.4f} p99={q['99%']:.4f} max={q['max']:.4f}")
     bad = adj[adj["norm"] > 1.0 + 1e-6]
-    print(f"  系数 >1 的记录：{len(bad):,}（后复权应有>1 的早期记录，"
-          f"若为 0 说明 latest 取错了）")
+    print(f"  系数 >1 的记录：{len(bad):,}（norm=f(t)/f(最新) 应恒 ≤1，"
+          f"正常应为 0；若不为 0 说明 latest 取到了更早日期（Tushare 倒序坑））")
 
 
 def merge_industry(con: sqlite3.Connection, dry_run: bool) -> int:

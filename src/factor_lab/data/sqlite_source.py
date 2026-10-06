@@ -44,23 +44,42 @@ def all_codes(db_path: Path | str = DB_PATH) -> list[str]:
 
 
 def load_prices(
-    codes: list[str] | None = None,
-    start: str | None = None,
-    end: str | None = None,
-    field: str = "close",
+    codes: list[str] | None,
+    start: str | None,
+    end: str | None,
+    field: str,
     db_path: Path | str = DB_PATH,
 ) -> pd.DataFrame:
     """读出宽表面板：行=date，列=code。
 
     这是 alphalens 的 `prices` 输入格式。
 
+    🔴 **`field` 是必填参数，没有默认值**（2026-10-06 改）。
+       此前默认 `close`（未复权），被 6 个研究脚本继承 ——
+       它们把未复权价喂给 alphalens 算前瞻收益，
+       除权日的向下假跳空被当成真实跌幅。
+
+       **实测全市场 5,606 只等权口径的年化偏差（未复权 − 前复权）：**
+
+           2016 −16.80pp / 2019 −10.80pp / 2025 −6.97pp
+           2021~2026 每年 −5.1 ~ −8.0pp
+
+       这个量级**大于本项目声称的任何因子收益**（最高的 ep 也只有 +6.1%）。
+
+       为什么不给默认值：**「忘了写口径」应当报错，而不是猜一个。**
+       保留默认值等于把设计缺陷藏进 API —— 门禁代替不了设计
+       （ENGINEERING.md 第五节）。忘了写会得到 `TypeError`，
+       而 TypeError 是吵的，静默的 −16.80pp 不是。
+
     参数
     ----
-    codes : 标的列表，带市场前缀如 'sh600519'。None 表示全部。
+    codes : 标的列表，带市场前缀如 'sh600519'。
     start, end : 'YYYY-MM-DD' 或 'YYYYMMDD'。None 表示不限。
     field : close / open / high / low / amount / vol / close_adj
-        ⚠️ 收益研究必须用 ``close_adj``（后复权）。``close`` 是未复权价，
-        除权日会出现假跳空（实测年化偏差 −2.365pp），见 AGENTS.md 第二节。
+        ⚠️ 收益研究必须用 ``close_adj``（前复权）。``close`` 是未复权价。
+        ⚠️ **只有 PB/PE/EP 才允许用未复权 ``close``**（要与 bps/eps 同口径），
+           那种场景建议用 :func:`factor_lab.data.load_factor_prices`
+           显式取两种口径。
 
     内存提示
     --------
@@ -119,7 +138,7 @@ def load_long(
     参数
     ----
     adjusted : False（默认）只返回**未复权** OHLC。
-        True 时**额外**返回三列后复权价，且**不改动**原始 OHLC：
+        True 时**额外**返回三列前复权价，且**不改动**原始 OHLC：
         ``close_adj`` / ``high_adj`` / ``low_adj``。
 
     ⚠️ **收益研究必须 adjusted=True**（AGENTS.md 第二节质量红线）。

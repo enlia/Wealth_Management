@@ -1,0 +1,131 @@
+"""从 SQLite 分块加载前复权行情。
+
+## 为什么单独成模块
+
+`run_long_only.py` 原本514 行，超过 ENGINEERING.md 的 500 行硬上限。
+拆分依据是**职责**：
+
+- 本模块：**从数据库取数**（内存/IO 边界）
+- `run_long_only.py`：**拿数据算因子、跑组合、出报告**
+
+取数与计算混在一起时，改加载策略必须读懂整套因子逻辑，反之亦然。
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "research" / "scripts"))
+
+from factor_lab.config import DB_PATH  # noqa: E402
+
+
+def dedupe_long(long: pd.DataFrame) -> pd.DataFrame:
+    """按 (code, date) 消掉重复行情行；同键不同值**直接报错**。
+
+    两类「重复」必须分开处理（DATA_SOURCE S5 / S8）：
+      · **整行完全相同** —— 分块读取的重叠拼接产物，是重复行，允许去掉；
+      · **同 (code, date) 但取值不同** —— 数据冲突（多版本 / 复权口径差异），
+        ``keep='last'`` 会静默丢掉冲突值、直接污染收益计算，必须抛错。
+
+    返回按 (code, date) 稳定排序的去重结果；
+    检测到取值冲突时抛 ValueError，信息含冲突键数量与示例。
+    """
+    rows_in = len(long)
+    out = long.drop_duplicates()          # 整行重复：拼接产物，允许去掉
+    conflict = out.duplicated(subset=["code", "date"], keep=False)
+    if conflict.any():
+        keys = (out.loc[conflict, ["code", "date"]]
+                   .drop_duplicates()
+                   .sort_values(["code", "date"]))
+        examples = ", ".join(
+            f"({r.code}, {r.date})" for r in keys.head(5).itertuples())
+        raise ValueError(
+            f"同一 (code, date) 存在**取值不同**的多行（{len(keys)} 个键），"
+            f"不允许静默 keep='last' 去重（DATA_SOURCE S5/S8）。\n"
+            f"  冲突键示例：{examples}\n"
+            f"  整行完全相同的重复行 {rows_in - len(out):,} 行已允许去掉；"
+            f"取值冲突说明数据源存在多版本或复权口径差异，"
+            f"必须先定下明确的保留规则（含 ann_date / update_flag 等版本维度）"
+            f"再处理。")
+    return out.sort_values(["code", "date"], kind="stable")
+
+
+def load_long_chunked(codes: list[str], start: str, end: str,
+                      years: tuple[int, ...] | None = None,
+                      verbose: bool = True) -> pd.DataFrame:
+    """分年加载前复权价，避免一次性读入撑爆内存。
+
+    ⚠️ **为什么必须分块**：
+    全市场 5,606 只 × 2,611 日 = **1,080 万行 × 9 列**，
+    实测 `load_long` 一次性加载直接
+    `numpy._core._exceptions._ArrayMemoryError: Unable to allocate 742 MiB`。
+    之前「跑 20 分钟」不是慢，是在反复 GC/重试 —— 假象会掩盖真问题。
+
+    做法：按年切片逐年加载，峰值内存降到 1/10。
+    因子计算只要 close_adj（有 OHLC 的因子才追加）。
+    """
+    import sqlite3
+
+    from factor_lab.config import DB_PATH
+
+    if years is None:
+        y0, y1 = int(start[:4]), int(end[:4])
+        years = tuple(range(y0, y1 + 1))
+
+    chunks: list[pd.DataFrame] = []
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    total = 0
+    for y in years:
+        ys, ye = f"{y}0101", f"{y}1231"
+        if ye < start[:8] or ys > end[:8]:
+            continue
+        lo = max(ys, start[:8])
+        hi = min(ye, end[:8])
+        parts = []
+        # 分批取代码，避免单条 SQL 的 IN 列表过长
+        # ⚠️ **列必须按因子声明的依赖取**，不能只取 OHLC。
+        #   实测踩过：volratio5_60 依赖 `vol`、amount20 依赖 `amount`，
+        #   而这里硬编码了 OHLC+close_adj ——
+        #   结果 `KeyError: 'Column not found: vol'`，
+        #   两个因子**从未在滚动检验里跑过**（静默漏测）。
+        #   代价可控：多取两列约增加 15% 内存（约 18MB/百万行）。
+        cols = ["code", "date", "open", "high", "low", "close", "close_adj"]
+        cols += [c for c in ("vol", "amount") if c not in cols]
+        for i in range(0, len(codes), 800):
+            sub = codes[i:i + 800]
+            q = (f"SELECT {', '.join(cols)} "
+                 f"FROM bar_daily WHERE date BETWEEN ? AND ? "
+                 f"AND close_adj IS NOT NULL AND code IN ({','.join('?' * len(sub))})")
+            parts.append(pd.read_sql(q, con, params=[lo, hi, *sub]))
+        if parts:
+            df = pd.concat(parts, ignore_index=True)
+            chunks.append(df)
+            total += len(df)
+            if verbose:
+                print(f"    {y}: {len(df):>10,} 行  累计 {total:>12,}")
+    con.close()
+    if not chunks:
+        # ⚠️ 可选数据缺失必须显式打印，不能默默返回空表（ENGINEERING 四）：
+        #   空表的成因可能是「区间外」「代码全错」「库里就没有这批数据」，
+        #   静默返回会让调用方把「取数失败」当成「该年没数据」。
+        print(f"    未加载到任何行情行（{len(codes)} 只，{start}~{end}）—— "
+              f"返回空表，请核对区间/代码/库内容")
+        return pd.DataFrame()
+    out = pd.concat(chunks, ignore_index=True).sort_values(
+        ["code", "date"], kind="stable")
+    # ⚠️ **必须转 datetime**：`bar_daily.date` 存的是 int（20260104），
+    #   而 `compute_factor` 内部用 `pd.DatetimeIndex(dates)` 构造索引。
+    #   int 被当纳秒时间戳 → 索引变成 1970-01-01 → unstack 后每年只有 1 行。
+    #   实测踩过：因子面板「每年 1 格」，而原始数据明明有 60 万行。
+    #   `load_long` 内部做了同样的转换，这里必须对齐。
+    out["date"] = pd.to_datetime(out["date"], format="%Y%m%d")
+    out["high_adj"] = out["high"] * out["close_adj"] / out["close"]
+    out["low_adj"] = out["low"] * out["close_adj"] / out["close"]
+    # ⚠️ 重叠日期守护：分块/库内重复行在此收口（整行重复去掉、
+    #   同键不同值抛错），返回值即去重后的对象。
+    return dedupe_long(out)

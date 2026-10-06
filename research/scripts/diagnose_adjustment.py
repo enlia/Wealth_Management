@@ -7,13 +7,13 @@
 
 判据（唯一可靠的区分方式）
 --------------------------
-对同一条 (股票, 日期)，分别在**未复权**与**后复权**口径下算日收益，
+对同一条 (股票, 日期)，分别在**未复权**与**前复权**口径下算日收益，
 用**同一套** ``market_rules`` 判定是否超限：
 
   · 两者都超限  → **源数据错误**。复权因子只改变价格水平，
     不可能把一个「原始价就已超限」的日子变成合规。这一类复权救不了。
-  · 仅未复权超限、后复权合规 → **正是除权污染**，已被复权修复。
-  · 仅后复权超限 →复权**引入**了问题（归一化系数取错等），必须为 0。
+  · 仅未复权超限、前复权合规 → **正是除权污染**，已被复权修复。
+  · 仅前复权超限 →复权**引入**了问题（归一化系数取错等），必须为 0。
 
 ⚠️ 两个口径必须用**同一套阈值**。实测踩过的坑：
    固定 TOL(1.005) 与 price_tolerance() 两套阈值差 0.05~0.15pp，
@@ -52,8 +52,8 @@ def over_limit(
 
     ⚠️ ``quoted_prev_close`` 必须是**未复权**的前收盘价。
        涨跌幅限制是交易所对**报价**的约束（昨收 ×(1±限幅) 再取整到 0.01 元），
-       与复权无关。若误用后复权价算容差，会把大量**合法涨停**判成超限——
-       实测北交所一只票后复权价恒为 1.30 元，算出容差 30.00%，
+       与复权无关。若误用前复权价算容差，会把大量**合法涨停**判成超限——
+       实测北交所一只票前复权价恒为 1.30 元，算出容差 30.00%，
        而真实涨幅恰为 +30.000%（合法封板）却被判超限。
 
     与 audit_data_quality.judge_limit_rules 同口径，但只看收益，
@@ -91,7 +91,7 @@ def main() -> int:
         codes = random.sample(codes, min(args.n, len(codes)))
 
     print(f"归因诊断 {len(codes):,} 只 A 股（{args.start} ~ {args.end}）")
-    print("同一套 market_rules 阈值，分别作用于未复权 close 与后复权 close_adj\n")
+    print("同一套 market_rules 阈值，分别作用于未复权 close 与前复权 close_adj\n")
 
     raw = load_prices(codes, args.start, args.end, field="close")
     adj = load_prices(codes, args.start, args.end, field="close_adj")
@@ -111,7 +111,7 @@ def main() -> int:
             continue
         # ⚠️ 交易日序号必须用**未复权**序列算，且两个口径共用同一个。
         #    close_adj 有 NULL（1.6% 的 A 股行）时 pct_change 会跳过缺失日，
-        #    导致后复权序列的位置前移；若用它算no_limit_days，
+        #    导致前复权序列的位置前移；若用它算no_limit_days，
         #    老股会被误判成「第 1~5 个交易日」而整段豁免，
         #    实测让「复权引入」虚高到 11,494 条（真实值 62 条）。
         idx_raw = {d: i + 1 for i, d in enumerate(raw[c].dropna().index)}
@@ -145,25 +145,25 @@ def main() -> int:
     print("=" * 74)
     print(f"  日收益样本              {n_tot:,}")
     print(f"  未复权超限              {n_raw:,}  ({n_raw/n_tot*100:.3f}%)")
-    print(f"  后复权超限              {n_adj:,}  ({n_adj/n_tot*100:.3f}%)")
+    print(f"  前复权超限              {n_adj:,}  ({n_adj/n_tot*100:.3f}%)")
     print()
     print("  ── 超限记录的归因 ──")
     print(f"  两者都超限 → 源数据错误  {n_both:,}  "
           f"({n_both/n_tot*100:.3f}%，复权无法修复)")
     print(f"  仅未复权超限 → 除权污染  {n_only_raw:,}  "
           f"({n_only_raw/n_tot*100:.3f}%，**已被复权修复**)")
-    print(f"  仅后复权超限 → 复权引入  {n_only_adj:,}  "
+    print(f"  仅前复权超限 → 复权引入  {n_only_adj:,}  "
           f"({n_only_adj/n_tot*100:.3f}%，**必须为 0**)")
     print()
     if n_only_adj:
-        print("  ⚠️ 存在较多「仅后复权超限」的记录，需查归一化系数是否取错（Tushare")
+        print("  ⚠️ 存在较多「仅前复权超限」的记录，需查归一化系数是否取错（Tushare")
         print("     返回倒序、groupby.last() 取到最早日期）。")
     else:
-        print("  ✓ 无「仅后复权超限」记录 → 复权实现正确")
+        print("  ✓ 无「仅前复权超限」记录 → 复权实现正确")
 
     print()
     print("=" * 74)
-    print("逐板块（未复权超限 / 后复权超限 / 被修复 / 复权引入）")
+    print("逐板块（未复权超限 / 前复权超限 / 被修复 / 复权引入）")
     print("=" * 74)
     for b in ["main", "gem", "star", "bse"]:
         if b not in per_board:

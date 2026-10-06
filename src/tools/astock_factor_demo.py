@@ -37,16 +37,21 @@ docs/02_方法与结论/03_A股量化算法全景对比.md）：
 from __future__ import annotations
 
 import argparse
+import sys
 import warnings
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from factor_lab.config import SCALING_TRADING_DAYS
+
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 200)
 
-TRADING_DAYS_PER_YEAR = 252
+TRADING_DAYS_PER_YEAR = SCALING_TRADING_DAYS  # ① 倍数换算层，唯一出处 config
 
 # ── A 股交易成本（务必按自己的实际费率调整）──────────────────────
 # 佣金万2.5（双边） + 印花税千0.5（仅卖出） + 滑点万5（双边估算）
@@ -77,11 +82,14 @@ def load_prices_akshare(codes: list[str], start: str, end: str) -> pd.DataFrame:
 
     close = {}
     for i, code in enumerate(codes):
+        # ⚠️ adjust="hfq" 是 akshare 的**后复权**（基期不动、末期抬高），
+        #    与本项目 close_adj（前复权 qfq：末日=原价、历史压低）不是
+        #    同一口径，两侧收益序列不可混算。
         try:
             df = ak.stock_zh_a_hist(symbol=code, period="daily",
                                     start_date=start.replace("-", ""),
                                     end_date=end.replace("-", ""),
-                                    adjust="hfq")  # 后复权，规避除权跳空
+                                    adjust="hfq")  # 后复权（hfq），规避除权跳空
         except Exception as e:  # noqa: BLE001
             print(f"    {code} 失败: {e}")
             continue

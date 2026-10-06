@@ -4,20 +4,39 @@
 """
 from __future__ import annotations
 
+import re
+import sqlite3
 import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "research" / "scripts"))
 ROOT = Path(__file__).resolve().parents[1]
+
+from run_financial_study import pick_sample  # noqa: E402
+from run_long_only import WARMUP_TRADING_DAYS, _shift_date, build_panel  # noqa: E402
 
 from factor_lab.analysis.selection import (  # noqa: E402
     rank_topk,
     select_with_buffer,
 )
-from factor_lab.config import DB_PATH  # noqa: E402
+from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+from factor_lab.data import all_codes  # noqa: E402
+from factor_lab.factors.price_volume import FACTORY, compute_factor  # noqa: E402
+
+
+def _sample_codes(n: int = 150) -> list[str]:
+    """按 sh/sz/bj 分层抽样取冒烟样本（P10(4)）。
+
+    ⚠️ 不能用 `codes[:n]`：代码排序下 bj4xxxxx（北交所旧代码段）排最前，
+       截取头部会抽成几乎全是北交所 —— 2021 年前北交所无行情，
+       与面板交集为 0，测试会空转成「看起来通过」（实测踩过）。
+    """
+    return pick_sample([c for c in all_codes() if is_a_share(c)], n)
 
 
 class TestRankTopk:
@@ -155,13 +174,11 @@ class TestLongOnlyDataDeps:
         漏了后面的 `cols += [...]`，报了假失败。
         诊断工具的可信度不高于被诊断代码（S12）。
         故这里真的从库里取一小段数据，用真实列名跑因子。
-        """
-        import sqlite3
-        import numpy as np
-        import pandas as pd
-        from factor_lab.config import DB_PATH
-        from factor_lab.factors.price_volume import FACTORY, compute_factor
 
+        ⚠️ 依赖真实数据库 `data/market.db`（不进 git）：
+        库不存在即跳过（CI 干净环境、未下载数据的环境），
+        有库环境照常真跑。
+        """
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         cols = {r[1] for r in con.execute("PRAGMA table_info(bar_daily)")}
         con.close()
@@ -214,9 +231,6 @@ class TestWarmupWindow:
         不报错、不影响其他因子，只让长窗口因子样本变少 ——
         这类缺陷最难发现。
         """
-        import sys as _s
-        _s.path.insert(0, str(ROOT / "research" / "scripts"))
-        from run_long_only import _shift_date
         got = _shift_date("20240101", -260)
         assert got <= "20230103", (
             f"预热起点 {got} 太晚 —— 应覆盖到 2023-01-02 左右。"
@@ -225,15 +239,9 @@ class TestWarmupWindow:
 
     def test_预热天数足够覆盖最长窗口(self):
         """WARMUP_TRADING_DAYS 必须 >= 最长因子窗口。"""
-        import sys as _s
-        _s.path.insert(0, str(ROOT / "research" / "scripts"))
-        from run_long_only import WARMUP_TRADING_DAYS
-        from factor_lab.factors.price_volume import FACTORY
         # 从注册表里挖出所有窗口参数的最大值
-        import re
         src = (ROOT / "src" / "factor_lab" / "factors"
                / "price_volume.py").read_text(encoding="utf-8")
-        nums = [int(m) for m in re.findall(r'FACTORY.*?(\d+)', src)]
         reg = re.search(r"FACTORY.*?\n\}", src, re.S)
         assert reg, "读不到 FACTORY"
         windows = [int(m) for m in
@@ -244,6 +252,68 @@ class TestWarmupWindow:
             assert WARMUP_TRADING_DAYS >= max(windows), (
                 f"预热 {WARMUP_TRADING_DAYS} <最长窗口 {max(windows)}，"
                 f"长窗口因子在年初会缺数据")
+
+    @pytest.mark.skipif(
+        not DB_PATH.exists(),
+        reason="缺数据产物：data/market.db",
+    )
+    def test_长窗口因子在首年就有值(self):
+        """⚠️ **首年也必须预热**（实测踩过）：
+        初版写 `if y > y0: pad_start = ... else: pad_start = ys`，
+        于是**首年完全没有预热数据**。
+
+        实测 `build_panel(..., '20190101', '20191231')`：
+          pos250 覆盖率 **0.0%**（需要 250 日窗口，2019 年内凑不满）
+          mom120_skip20 覆盖率 7.5%
+
+        长窗口因子在首年大面积 NaN，
+        表现为「因子没数据」，容易被误判成「该股不合格」。
+        """
+        codes = _sample_codes()
+        assert len({c[:2] for c in codes}) >= 2, (
+            f"分层样本应覆盖 ≥2 个市场，实际 {[c[:2] for c in codes][:10]}")
+        p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
+        assert p["rev5"].notna().sum().sum() > 0, (
+            "样本在 2019 年必须实际有行情行 —— 否则是抽样抽空了，测试在空转")
+        cov250 = float(p["pos250"].notna().mean().mean())
+        cov5 = float(p["rev5"].notna().mean().mean())
+        assert cov250 > 0, (
+            f"pos250 在首年覆盖率 {cov250:.1%} —— 预热没生效。"
+            f"长窗口因子需要 250 个交易日，首年窗口内凑不满是必然的。")
+        # pos250 的覆盖率必然低于 rev5（窗口长得多），但不应为 0
+        assert cov250 < cov5, (
+            f"pos250({cov250:.1%}) 不应高于 rev5({cov5:.1%})，"
+            f"否则说明窗口长度没有生效")
+
+    @pytest.mark.skipif(
+        not DB_PATH.exists(),
+        reason="缺数据产物：data/market.db",
+    )
+    def test_因子面板与价格面板索引一致(self):
+        """⚠️ **两个面板必须用同一裁剪区间**（实测踩过）：
+        因子裁了、price 没裁 → price 488 行 vs factor 244 行，
+        下游 `take_along_axis` 抛
+        `IndexError: shape mismatch ... (488,1) (244,30)`。
+
+        这个错在下游报出来看起来像 numpy 的问题，
+        实际是取数层两个面板口径不一致。
+
+        ⚠️ 断言对象是 **build_panel 返回的 out["__price__"] 本身** ——
+        保护（去重/裁剪）必须落在返回值上，不能只落在内部局部变量上，
+        否则测试与运行时读到的恰是没被保护的对象。
+        """
+        codes = _sample_codes()
+        assert len({c[:2] for c in codes}) >= 2, (
+            f"分层样本应覆盖 ≥2 个市场，实际 {[c[:2] for c in codes][:10]}")
+        p = build_panel(codes, ["rev5"], "20190101", "20201231")
+        px = p["__price__"]
+        assert px.index.is_unique, (
+            "返回的价格面板本身必须已去重 —— 去重要落在返回值上")
+        assert px.index.equals(p["rev5"].index), (
+            f"价格面板 {len(px.index)} 行 vs 因子面板 "
+            f"{len(p['rev5'].index)} 行，索引必须一致")
+        assert p["rev5"].notna().sum().sum() > 0, (
+            "样本在 2019~2020 年必须实际有行情行 —— 否则测试在空转")
 
 
 if __name__ == "__main__":

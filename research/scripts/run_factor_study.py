@@ -161,7 +161,7 @@ def main() -> int:
             "  解决：确认 bar_daily 已有 close_adj 且调用 load_long(adjusted=True)"
         )
     n_adj = int(long["close_adj"].notna().sum())
-    print(f"      后复权覆盖 {n_adj:,} / {len(long):,} = {n_adj/len(long)*100:.3f}%")
+    print(f"      前复权覆盖 {n_adj:,} / {len(long):,} = {n_adj/len(long)*100:.3f}%")
 
     info = load_stock_info()
     info = info[info["code"].isin(codes)]
@@ -173,7 +173,7 @@ def main() -> int:
     alive = long["code"].unique().tolist()
 
     # ── 3. 价格面板 ─────────────────────────────────────────
-    print("\n[3/5] 读取价格宽表（alphalens 输入，后复权）…")
+    print("\n[3/5] 读取价格宽表（alphalens 输入，前复权）…")
     t0 = time.perf_counter()
     # ⚠️ 必须是 close_adj。alphalens 用 prices.pct_change() 算前瞻收益，
     #    未复权价会把除权跳空当成真实涨跌，直接污染 IC 与分组收益。
