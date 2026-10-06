@@ -100,3 +100,55 @@ class TestBuildPanelAlignment:
         assert px.index.is_unique, "返回的价格面板必须已去重"
         assert px.index.equals(out["a"].index), "两面板日期索引必须一致"
         assert len(px) == len(DATES)
+
+
+class TestPriceWriteBack:
+    def test_多片段重叠日期拼接后去重必须落在返回值(self, monkeypatch):
+        """R3b 的真实触发形态：**多个年份片段各含同一批日期** ⇒ 拼接出重复日期。
+
+        单片段打桩造不出该形态（价格片段逐年的裁剪区间在真实日历上天然互斥），
+        故打桩裁剪边界：`long_only_panel.pd` 换成替身，ys 输入（…0101 结尾）
+        给 `Timestamp.min`、其余给 `Timestamp.max` —— 每个年份片段都保留
+        全部日期，3 个片段（2018/2019/2020）各 4 日 = 12 行进拼接。
+        （用例 start/end 固定 …0101 / …1231 结尾，与替身判定规则绑定。）
+
+        还原「价格去重只落局部变量、返回值还是旧对象」的写法：
+        本用例 **FAILED**（返回的价格面板残留重复日期）；
+        现写法（去重写回返回值）：**PASSED**。双向均已实跑留证。
+        """
+        dates = pd.to_datetime(["2019-01-02", "2019-01-03",
+                                "2020-01-02", "2020-01-03"])
+        call_no = {"n": 0}
+
+        def fake_loader(codes, start, end, years=None, verbose=True):
+            call_no["n"] += 1
+            return pd.DataFrame({"code": CODE, "date": dates,
+                                 "close_adj": [float(call_no["n"])] * 4})
+
+        def fake_compute(name, long_df):
+            idx = pd.MultiIndex.from_arrays([dates, [CODE] * 4],
+                                            names=["date", "asset"])
+            return pd.Series(1.0, index=idx)
+
+        class _BroadPd:
+            """build_panel 对 pd 只用 Timestamp（裁剪边界）与 concat。"""
+
+            concat = staticmethod(pd.concat)
+
+            @staticmethod
+            def Timestamp(s):
+                return (pd.Timestamp.min if str(s).endswith("0101")
+                        else pd.Timestamp.max)
+
+        monkeypatch.setattr(long_only_panel, "pd", _BroadPd)
+        monkeypatch.setattr(long_only_panel, "load_long_chunked", fake_loader)
+        monkeypatch.setattr(long_only_panel, "compute_factor", fake_compute)
+
+        out = build_panel([CODE], ["a"], "20180101", "20201231")
+        px = out["__price__"]
+        assert call_no["n"] == 3, "应产 3 个年份片段（2018/2019/2020）"
+        assert px.index.is_unique, (
+            "去重必须落在返回值：多片段含重叠日期时，返回的价格面板仍带重复日期")
+        assert sorted(px.index) == sorted(dates), f"应剩 4 个日期，实际 {len(px)}"
+        assert float(px.loc[pd.Timestamp("2019-01-02"), CODE]) == 3.0, (
+            "重复日期按 keep='last' 保留最后片段的值")
