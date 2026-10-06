@@ -26,6 +26,69 @@ from long_only_data import (  # noqa: E402
 )
 
 
+def assemble_frames(parts: list[pd.DataFrame], label: str) -> pd.DataFrame:
+    """把多年份片段沿日期轴拼成一张宽表；同一日期重复时只留最后一份。
+
+    ⚠️ **去重结果就是返回值本身** —— 调用方与下游只应拿到去重后的对象。
+       不允许「去重落在局部变量、返回值还是旧对象」：那样保护形同虚设，
+       测试与运行时读到的恰是没被保护的那个面板。
+    """
+    #⚠️ 必须 axis=0（按日期索引纵向堆叠）。
+    #   axis=1 是横向拼列，会把 11 年的因子并成 5,600×11 列，
+    #   实测表现为「每年只有 1 格」。
+    wide = pd.concat(parts, axis=0) if len(parts) > 1 else parts[0]
+    # 跨年预热期可能与下一年重叠，同一 (日期, 代码) 只保留一份
+    dup = wide.index.duplicated(keep="first")
+    if dup.any():
+        n_dup = int(dup.sum())
+        wide = wide[~wide.index.duplicated(keep="last")]
+        print(f"    {label}: 拼接片段含 {n_dup} 个重复日期（跨年重叠），"
+              f"已按 keep='last' 去重为 {len(wide):,} 行")
+    return wide
+
+
+def check_alignment(out: dict[str, pd.DataFrame]) -> None:
+    """因子面板与价格面板的日期索引必须完全一致 —— **逐个因子**与价格比对。
+
+    ⚠️⚠️ 这是实测踩过的错：因子裁剪了、price 没裁 →
+       price 488 行 vs factor 244 行，下游 `take_along_axis` 抛
+       `IndexError: shape mismatch ... (488,1) (244,30)`。
+       这个错在下游报出来，**看起来像 numpy 的问题**，
+       实际是取数层两个面板口径不一致 —— 故在源头断言，错误指向根因。
+
+    ⚠️ 保护必须覆盖**所有**因子面板：
+       只拿第一个因子与 price 比对时，其余因子的索引不一致不会被发现，
+       而下游 shape mismatch 照样发生；价格面板也不能拿自己跟自己比 ——
+       一个因子都没有时必须按失败抛错，不许打印「对齐通过」。
+    """
+    factor_names = [k for k in out if k != "__price__"]
+    price = out.get("__price__")
+    if price is None or price.empty:
+        raise ValueError(
+            "价格面板为空 —— 没有价格就没有收益可算，"
+            "禁止以空面板冒充对齐通过。")
+    if not factor_names:
+        raise ValueError(
+            "没有任何因子面板（逐年因子结果全为空）—— "
+            "价格面板单独存在没有意义，禁止打印「对齐通过」。")
+    ref = price.index
+    if not ref.is_unique:
+        raise ValueError(
+            f"价格面板日期索引仍有重复（{int(ref.duplicated().sum())} 处）——"
+            f"去重必须落在返回对象上。")
+    for name in factor_names:
+        idx = out[name].index
+        if not idx.equals(ref):
+            missing = len(ref.difference(idx))
+            extra = len(idx.difference(ref))
+            raise ValueError(
+                f"因子面板 {name} 与价格面板日期索引不一致："
+                f"price {len(ref)} 行 vs factor {len(idx)} 行"
+                f"（{name} 缺 {missing} 天，多 {extra} 天）。\n"
+                f"  根因通常是两者用了不同的裁剪区间 —— "
+                f"必须用**同一个** [ys, ye] 裁剪。")
+
+
 def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
     """算各因子的宽表面（索引=日期，列=代码）。
 
@@ -141,13 +204,7 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         if not parts:
             print(f"  ⚠ 因子 {f} 无数据")
             continue
-        #⚠️ 必须 axis=0（按日期索引纵向堆叠）。
-        #   axis=1 是横向拼列，会把 11 年的因子并成 5,600×11 列，
-        #   实测表现为「每年只有 1 格」。
-        wide = (pd.concat(parts, axis=0) if len(parts) > 1 else parts[0])
-        # 跨年预热期可能与下一年重叠，同一 (日期, 代码) 只保留一份
-        if wide.index.duplicated().any():
-            wide = wide[~wide.index.duplicated(keep="last")]
+        wide = assemble_frames(parts, f)
         wide = wide.sort_index().loc[
             (wide.index >= pd.Timestamp(f"{y0}0101"))
             & (wide.index <= pd.Timestamp(f"{y1}1231"))]
@@ -156,33 +213,20 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         print(f"  ✓ {f:<16} 覆盖率 {cov*100:5.1f}%  "
               f"非空 {wide.notna().sum().sum():>12,}  "
               f"内存 {wide.memory_usage(deep=True).sum()/1e6:.0f}MB")
-    out["__price__"] = (pd.concat(price_parts, axis=0)
+    # ⚠️ **价格面板的去重必须落在 out["__price__"] 上**（实测踩过的反例：
+    #   去重结果只赋给局部变量 p，返回 dict 里仍是未去重对象，
+    #   测试与运行时读到的恰是没被保护的那个）。
+    out["__price__"] = (assemble_frames(price_parts, "price")
                         if price_parts else pd.DataFrame())
     p = out["__price__"]
-    if p.index.duplicated().any():
-        p = p[~p.index.duplicated(keep="last")]
     print(f"  ✓ {'price':<16} 覆盖率 "
           f"{float(p.notna().mean().mean())*100:5.1f}%  "
           f"内存 {p.memory_usage(deep=True).sum()/1e6:.0f}MB")
 
-    # ⚠️⚠️ **因子面板与价格面板的日期索引必须完全一致**（实测踩过）：
-    #   因子裁剪了、price 没裁 → price 488 行 vs factor 244 行，
-    #   下游 `take_along_axis` 抛
-    #   `IndexError: shape mismatch ... (488,1) (244,30)`。
-    #   这个错在下游报出来，**看起来像 numpy 的问题**，
-    #   实际是取数层两个面板口径不一致。
-    #   故在源头断言，错误信息直接指向根因。
-    if out:
-        ref = next(iter(out.values())).index
-        if not p.index.equals(ref):
-            missing = len(ref.difference(p.index))
-            extra = len(p.index.difference(ref))
-            raise ValueError(
-                f"价格面板与因子面板日期索引不一致："
-                f"price {len(p.index)} 行 vs factor {len(ref)} 行"
-                f"（price 缺 {missing} 天，多 {extra} 天）。\n"
-                f"  根因通常是两者用了不同的裁剪区间 —— "
-                f"必须用**同一个** [ys, ye] 裁剪。")
-        print(f"  ✓ 面板对齐检查通过（{len(ref):,} 个交易日 × "
-              f"{len(next(iter(out.values())).columns):,} 只）")
+    # 对齐检查：逐个因子与价格面板全量比对，失败直接抛错（见 check_alignment）
+    check_alignment(out)
+    ref = out["__price__"].index
+    print(f"  ✓ 面板对齐检查通过（{len(ref):,} 个交易日 × "
+          f"{len(out['__price__'].columns):,} 只，"
+          f"{sum(1 for k in out if k != '__price__')} 个因子逐一比对）")
     return out

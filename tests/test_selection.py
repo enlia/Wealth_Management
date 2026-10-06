@@ -277,15 +277,19 @@ class TestWarmupWindow:
 
         这个错在下游报出来看起来像 numpy 的问题，
         实际是取数层两个面板口径不一致。
+
+        ⚠️ 断言对象是 **build_panel 返回的 out["__price__"] 本身** ——
+        保护（去重/裁剪）必须落在返回值上，不能只落在内部局部变量上，
+        否则测试与运行时读到的恰是没被保护的对象。
         """
-        import sys as _s
-        _s.path.insert(0, str(ROOT / "research" / "scripts"))
         from factor_lab.config import is_a_share
         from factor_lab.data import all_codes
         from run_long_only import build_panel
         codes = [c for c in all_codes() if is_a_share(c)][:150]
         p = build_panel(codes, ["rev5"], "20190101", "20201231")
         px = p["__price__"]
+        assert px.index.is_unique, (
+            "返回的价格面板本身必须已去重 —— 去重要落在返回值上")
         assert px.index.equals(p["rev5"].index), (
             f"价格面板 {len(px.index)} 行 vs 因子面板 "
             f"{len(p['rev5'].index)} 行，索引必须一致")
