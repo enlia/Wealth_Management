@@ -41,12 +41,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from factor_lab.config import DB_PATH, MARKET_CAP_UNIT, YI_TO_WAN  # noqa: E402
 
-# 抽查标的：沪深主板 + 创业板 + 保险 + 宁德，覆盖不同量级
+# 抽查标的：沪深主板 + 创业板 + 保险 + 宁德，覆盖不同量级；
+# 其他权益工具口径项入探针清单（U6）：再加两只其他权益工具存量大户
+# （market.db ts_balance_sheet@20260630 实测 oth_eqt_tools：招商银行
+#   1999.89 亿、农业银行 4700.0 亿；sz000001 自带 800.0 亿），
+# 探针 4→6 覆盖「有/无其他权益工具」两种权益切分形态。
 PROBES = [
     ("sh600519", "600519.SH", "贵州茅台（大盘蓝筹）"),
     ("sz000001", "000001.SZ", "平安银行（深主板）"),
     ("sh601318", "601318.SH", "中国平安（保险）"),
     ("sz300750", "300750.SZ", "宁德时代（创业板）"),
+    ("sh600036", "600036.SH", "招商银行（其他权益工具大户）"),
+    ("sh601288", "601288.SH", "农业银行（其他权益工具大户）"),
 ]
 
 TOL = 0.01          # 1% 容差（Tushare 与通达信都只保留有限小数）
@@ -284,6 +290,163 @@ def check_against_tushare(con: sqlite3.Connection) -> list[str]:
     return msgs
 
 
+def probe_equity_row(con: sqlite3.Connection, code: str) -> dict:
+    """单票权益口径探针：最新期 ts 行 + db_bps + C/A 对账 + 两守卫（只读）。
+
+    缺行/缺基准/归母 NULL 返回 status 字段显式说明，不冒算。
+    """
+    row = con.execute(
+        "SELECT end_date, total_hldr_eqy_exc_min_int, total_hldr_eqy_inc_min_int,"
+        " minority_int, oth_eqt_tools, total_share FROM ts_balance_sheet"
+        " WHERE ts_code=? AND report_type='1' ORDER BY end_date DESC LIMIT 1",
+        (code,),
+    ).fetchone()
+    if not row:
+        return {"code": code, "status": "ts_balance_sheet 无 report_type='1' 行"}
+    end_date, exc, inc, minority, oth, share = row
+    if exc is None:
+        return {"code": code, "status": f"归母 NULL（bs {end_date}）—— 不可反推"}
+    bps_row = con.execute(
+        "SELECT bps, end_date FROM ts_fina_indicator WHERE ts_code=?"
+        " ORDER BY end_date DESC LIMIT 1",
+        (code,),
+    ).fetchone()
+    if not bps_row or not bps_row[0]:
+        return {"code": code, "status": "ts_fina_indicator 无 bps —— 无对账基准"}
+    si = con.execute(
+        "SELECT price, bps, pb FROM stock_info WHERE code=?", (code,)
+    ).fetchone()
+    return {
+        "code": code,
+        "status": "ok",
+        "bs_end_date": end_date,
+        "bps_end_date": bps_row[1],
+        "exc_min_int_yi": exc,
+        "inc_min_int_yi": inc,
+        "minority_int_yi": minority,
+        "oth_eqt_tools_yi": oth,
+        "total_share": share,
+        "db_bps": bps_row[0],
+        "verdict": compare_bps_with_db(bps_row[0], exc, oth, share),
+        "identity": equity_identity_guard(inc, exc, minority),
+        "pb": snapshot_pb_guard(*(si if si else (None, None, None))),
+    }
+
+
+def check_equity_caliber(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """检查 3：每股净资产反推（U6 C 式）+ 其他权益工具敞口 + 两守卫。
+
+    返回 (msgs, warns) 两级：C 式对账失败/缺行/缺列为阻断级（exit 1）；
+    A 败 C 胜族标记与两守卫违例为记录级——那是数据形态事实（快照混日期、
+    权益切分混装族），修复动作在数据线，不在本工具，不与市值修复 SQL 混提示。
+    """
+    require_oth_eqt_tools_column(con)
+    msgs: list[str] = []
+    warns: list[str] = []
+    print()
+    print("=" * 72)
+    print("检查 3：每股净资产反推（普通股权益口径）+ 两守卫")
+    print(f"        C 式 = {U6_FORMULA_C}")
+    print("=" * 72)
+    print(f"{'标的':<26}{'其他权益工具亿':>14}{'C式隐含':>10}{'db_bps':>10}"
+          f"{'relC':>10}{'relA(对照)':>12}  判定")
+    print("-" * 72)
+    for code, _ts, name in PROBES:
+        p = probe_equity_row(con, code)
+        if p["status"] != "ok":
+            msgs.append(f"{name} {code}：{p['status']}")
+            print(f"{name:<26}{'-':>14}{'-':>10}{'-':>10}{'-':>10}{'-':>12}  ✗ {p['status']}")
+            continue
+        v = p["verdict"]
+        oth = p["oth_eqt_tools_yi"]
+        mark = "✓" if v["pass_c"] else "✗ C 式仍败"
+        if v["family"]:
+            mark += f"｜{v['family']}"
+        print(f"{name:<26}{(oth or 0.0):>14,.2f}{v['implied_c']:>10,.4f}"
+              f"{p['db_bps']:>10,.4f}{v['rel_c']:>10.2e}{v['rel_a']:>12.2e}  {mark}")
+        if not v["pass_c"]:
+            msgs.append(
+                f"{name} {code}：C 式反推 {v['implied_c']:.4f} vs db_bps {p['db_bps']}，"
+                f"rel {v['rel_c']:.2%} 超 1% —— 未知族（UNKNOWN），单列追踪不填空"
+            )
+        if v["family"]:
+            warns.append(
+                f"{name} {code}：{v['family']}（A 式 rel {v['rel_a']:.2%} 败 / C 式胜；"
+                f"oth_eqt_tools={oth:,.2f} 亿，扣口径后收敛 {v['rel_c']:.2e}）"
+            )
+        g = p["identity"]
+        if not g["checkable"]:
+            warns.append(f"{name} {code}：恒等式不可检（缺 {g['missing']}）")
+        elif not g["pass"]:
+            warns.append(
+                f"{name} {code}：恒等式 inc−exc=minority 违例，残差 {g['residual_yi']:.4f} 亿"
+                f"（容差 ±{g['tol_yi']}）—— 权益切分混装嫌疑"
+            )
+        g = p["pb"]
+        if not g["checkable"]:
+            warns.append(f"{name} {code}：快照自洽不可检（缺 {g['missing']}）")
+        elif not g["pass"]:
+            warns.append(
+                f"{name} {code}：price/bps={g['ratio']:.5f} vs pb 快照值偏离 {g['rel_err']:.2%}"
+                f"（容差 {g['tol']:.0%}）—— stock_info 快照混日期嫌疑"
+            )
+    return msgs, warns
+
+
+# ── 市值量纲修复 SQL（幂等版）───────────────────────────────────
+# 旧提示 `UPDATE stock_info SET mktcap *= 1e4` 是整列乘法：重跑一次就再放大
+# 1e4，修复工具自己就是事故源。幂等版带量纲形态条件：每行只在「当前确为亿元
+# 形态」（亿元形态反推价=价格、万元形态反推价≠价格）时换算一次，换算后条件不再成立。
+FIX_MKTCAP_UNIT_SQL = """
+UPDATE stock_info
+   SET mktcap = mktcap * 1e4,
+       float_mktcap = float_mktcap * 1e4
+ WHERE price > 0 AND shares > 0 AND mktcap > 0
+   AND ABS(mktcap / shares - price) / price < 0.01
+   AND ABS(mktcap / 1e4 / shares - price) / price >= 0.01
+"""
+
+
+def stock_info_fix_copy(con: sqlite3.Connection) -> sqlite3.Connection:
+    """把 stock_info 修复相关列拷进内存可写副本（真库只读，修复试验在副本上做）。"""
+    mem = sqlite3.connect(":memory:")
+    mem.execute(
+        "CREATE TABLE stock_info (code TEXT PRIMARY KEY, mktcap REAL,"
+        " float_mktcap REAL, price REAL, shares REAL)"
+    )
+    mem.executemany(
+        "INSERT INTO stock_info(code, mktcap, float_mktcap, price, shares)"
+        " VALUES (?,?,?,?,?)",
+        con.execute("SELECT code, mktcap, float_mktcap, price, shares FROM stock_info"),
+    )
+    mem.commit()
+    return mem
+
+
+def apply_fix_sql(con: sqlite3.Connection) -> int:
+    """执行幂等修复 SQL，返回实际变动行数。con 需可写（用副本，不碰真库）。"""
+    cur = con.execute(FIX_MKTCAP_UNIT_SQL)
+    con.commit()
+    return cur.rowcount
+
+
+def assert_fix_sql_idempotent(con: sqlite3.Connection) -> dict:
+    """幂等断言：修复 SQL 第二次执行必须零变动、表内容逐行不变。
+
+    修复工具自身必须先过幂等断言（UNITS U3 注：修复工具本身要做幂等断言），
+    否则按一次修复口径写的运维动作重跑就是二次事故。
+    """
+    first = apply_fix_sql(con)
+    once = sorted(con.execute("SELECT code, mktcap, float_mktcap FROM stock_info"))
+    second = apply_fix_sql(con)
+    twice = sorted(con.execute("SELECT code, mktcap, float_mktcap FROM stock_info"))
+    if twice != once or second != 0:
+        raise AssertionError(
+            f"修复 SQL 非幂等：重跑仍变动 {second} 行 —— 禁止作为修复手段使用"
+        )
+    return {"first_run_rows": first, "second_run_rows": second, "idempotent": True}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-tushare", action="store_true")
@@ -293,18 +456,30 @@ def main() -> int:
     msgs: list[str] = check_self_consistency(con)
     if not args.skip_tushare:
         msgs += check_against_tushare(con)
+    u6_msgs, u6_warns = check_equity_caliber(con)
+    msgs += u6_msgs
+    # 修复 SQL 幂等断言常驻自检（试验只在内存副本上做，真库全程只读）
+    fix_probe = assert_fix_sql_idempotent(stock_info_fix_copy(con))
     con.close()
 
     print()
     print("=" * 72)
+    print(f"修复 SQL 幂等断言：副本首跑变动 {fix_probe['first_run_rows']} 行、"
+          f"重跑变动 {fix_probe['second_run_rows']} 行 → 重跑结果不变 ✓")
+    for w in u6_warns:
+        print(f"  ⚠ 记录（不阻断）：{w}")
     if msgs:
         print(f"✗ 发现 {len(msgs)} 个问题：")
         for m in msgs:
             print(f"  · {m}")
         print()
         print("处理方式：不要猜单位。执行下面任一方案后重跑本脚本——")
-        print("  A. 若本机是亿元：UPDATE stock_info SET mktcap *= 1e4, float_mktcap *= 1e4")
+        print("  A. 若本机市值是亿元：执行下方【幂等】修复 SQL（带量纲形态条件，")
+        print("     每行只在确为亿元形态时换算一次，重跑零变动）：")
+        for line in FIX_MKTCAP_UNIT_SQL.strip().splitlines():
+            print(f"     {line}")
         print("  B. 若 Tushare 侧需换算：在 merge脚本中统一，不要在下游各自换")
+        print("  C. 权益口径/守卫类记录（⚠ 打头）按点名单逐票核对报表期与快照日，不要猜口径重算")
         print("=" * 72)
         return 1
 
