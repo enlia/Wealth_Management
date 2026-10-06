@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -79,7 +80,32 @@ DATE_COLS: tuple[str, ...] = (
     "trade_date", "ann_date", "end_date", "start_date", "list_date",
     "delist_date", "float_date", "cal_date", "f_ann_date", "f_end_date",
     "update_date", "release_date", "lock_date",
+    # ⚠️ 下面这几个是实测扫描补上的（2026-10-06 review 发现漏迁）：
+    #   in_date  指数/行业成分「纳入日期」，29 张表都有 —— 做 universe 必用
+    #   actual_date / pre_date  财报预约披露日期
+    #   begin_date / pretrade_date 上交所债券字段
+    #   out_date  指数成分「剔除日期」
+    "in_date", "out_date", "begin_date", "actual_date", "pre_date",
+    "pretrade_date",
 )
+
+# 兜底：列名含 date 且类型是 string/float 时也当日期处理。
+# ⚠️ **为什么必须留兜底**：靠人肉枚举 DATE_COLS 必然漏 ——
+#   实测第一轮枚举了 13 个，扫全库发现还漏 5 个
+#   （in_date 涉及 29 张表），其中 in_date 是指数成分纳入日期，
+#   构造股票池时必然要用。漏一个就是一处静默失效。
+# ⚠️ **排除 update_flag**：它含 "date" 子串但是 0/1 标志位，不是日期。
+DATE_EXCLUDE = frozenset({"update_flag", "update_date_flag"})
+DATE_HINT = re.compile(r"date$|^date_|_date_", re.I)
+
+
+def is_date_col(name: str, dtype_kind: str) -> bool:
+    """该列是否应按日期处理。"""
+    if name in DATE_EXCLUDE:
+        return False
+    if name in DATE_COLS:
+        return True
+    return dtype_kind in "OSUf" and bool(DATE_HINT.search(name))
 
 
 def normalize_types(df: pd.DataFrame) -> pd.DataFrame:
@@ -100,8 +126,9 @@ def normalize_types(df: pd.DataFrame) -> pd.DataFrame:
     下游各自转是「东拼西凑」，且总会有人忘记 —— 规范禁止那种写法。
     """
     out = df.copy()
-    for c in DATE_COLS:
-        if c not in out.columns:
+    for c in out.columns:
+        kind = out[c].dtype.kind
+        if not is_date_col(c, kind):
             continue
         s = out[c]
         if s.dtype.kind in "OSU":
@@ -126,7 +153,16 @@ def normalize_types(df: pd.DataFrame) -> pd.DataFrame:
                     f"样例 {s.dropna().head(3).tolist()}")
             out[c] = s.round().astype("Int32")
         elif s.dtype.kind in "iu":
-            out[c] = s.astype("int32")
+            # ⚠️ **pandas 可空整数必须保持可空**。
+            #   实测踩过：`Int32`（含 73,575 个 NA）被强转 numpy `int32`
+            #   会抛 `ValueError: cannot convert NA to integer`。
+            #   这让 `normalize_types` **不幂等** ——
+            #   对已迁移的表再跑一次就崩，迁移脚本无法重跑。
+            #   故只有「确认无 NA」时才用 numpy int32（物理类型更紧凑）。
+            if s.isna().any():
+                out[c] = s.astype("Int32")
+            else:
+                out[c] = s.astype("int32")
     return out
 
 

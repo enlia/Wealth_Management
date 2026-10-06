@@ -31,26 +31,27 @@ import pyarrow.parquet as pq
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
-from tushare_paths import DATE_COLS, OUT, normalize_types  # noqa: E402
+from tushare_paths import OUT, is_date_col, normalize_types  # noqa: E402
 
 BACKUP = ROOT / "runtime" / "tushare_backup_pre_datetype"
 
 
-def date_cols_of(path: Path) -> list[str]:
-    sch = pq.read_schema(path)
-    return [c for c in DATE_COLS if c in sch.names]
-
-
 def string_date_cols(path: Path) -> list[str]:
-    """返回「类型错误」的日期列名。"""
+    """返回「类型错误」的日期列名（string / float 两种）。
+
+    ⚠️ 只报**尚未归一**的列。已经迁成 int32 的表不会被重复列出——
+       早版按「是不是日期列」判定，导致已迁移的表反复出现在迁移清单里。
+    """
     sch = pq.read_schema(path)
+    BAD_KIND = {"string": "O", "large_string": "O", "double": "f",
+                "float": "f", "float32": "f"}
     bad = []
-    for c in DATE_COLS:
-        if c not in sch.names:
-            continue
-        t = str(sch.field(c).type)
-        if t in ("string", "large_string", "double", "float",
-                 "timestamp", "date32", "date64"):
+    for c in sch.names:
+        base = str(sch.field(c).type).split("[")[0]
+        kind = BAD_KIND.get(base)
+        if kind is None:
+            continue                      # int32/int64/其他：无需迁移
+        if is_date_col(c, kind):
             bad.append(c)
     return bad
 
@@ -88,7 +89,14 @@ def main() -> int:
     failed = []
     for f, bad in todo:
         before = pq.ParquetFile(f).metadata.num_rows
-        shutil.copy2(f, BACKUP / f.name)
+        bak = BACKUP / f.name
+        shutil.copy2(f, bak)
+        # ⚠️ **回滚依赖备份完整**，必须校验后再改原文件。
+        #   否则备份被手工清理过时，回滚会用**空/过期**文件
+        #   覆盖掉刚写出的好数据 —— 从「类型错」变成「数据没了」。
+        if not bak.exists() or pq.ParquetFile(bak).metadata.num_rows != before:
+            raise RuntimeError(
+                f"备份校验失败（{bak.name}），已中止该表迁移，未改动原文件")
         try:
             df = pd.read_parquet(f)
             out = normalize_types(df)
@@ -103,7 +111,7 @@ def main() -> int:
             print(f"  ✓ {f.name:<32} {before:>12,} 行")
         except Exception as e:                                   # noqa: BLE001
             failed.append((f.name, str(e)))
-            shutil.copy2(BACKUP / f.name, f)      # 回滚
+            shutil.copy2(bak, f)      # 回滚（bak 已校验过完整性）
             print(f"  ✗ {f.name:<32} {e}（已回滚）")
 
     print()
@@ -119,8 +127,10 @@ def main() -> int:
         ver = build_manifest()
         print(f"\n数据版本（新）: {ver['version']}  "
               f"{ver['stamped_at']}  "
-              f"{ver['counts']['ts_tables']} 张 tushare 表 / "
-              f"{ver['counts']['db_tables']} 张库表")
+              f"{ver['totals']['ts_tables']} 张 tushare 表 / "
+              f"{ver['totals']['ts_rows']:,} 行  |  "
+              f"{ver['totals']['db_tables']} 张库表 / "
+              f"{ver['totals']['db_rows']:,} 行")
     except Exception as e:                                       # noqa: BLE001
         print(f"\n⚠ 版本打戳失败: {e}")
     return 0
