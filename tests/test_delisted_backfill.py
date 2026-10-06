@@ -242,16 +242,69 @@ class TestBinsQuantileLabels:
         # 这就是不能用 nunique() 的理由
         assert clean["factor_quantile"].nunique() != max(labels)
 
-    def test_换手率必须覆盖真实标签(self) -> None:
-        from alphalens.performance import quantile_turnover
+    @staticmethod
+    def _turn_panel():
+        """换手可判别面板：Q1/{0} 档成员逐日轮换（换手≈1），Q3/{1} 档轮换更慢。
 
-        factor, prices = self._panel()
-        clean, labels = self._labels(factor, prices, bins=3)
-        covered = {q for q in labels
-                   if quantile_turnover(clean["factor_quantile"], q)
-                   is not None}
-        assert covered == set(labels), \
-            f"换手率未覆盖全部分位：缺 {set(labels) - covered}"
+        两档换手**必须不相等**，旧公式（range(1, nunique+1) 只覆盖 {Q1, 幽灵 Q2}）
+        与新公式（覆盖全部真实标签 {Q1, Q3}）才给出不同数值 ——
+        面板区分不开新旧公式时，用例会以「面板失效」显式失败（尺子自证）。
+        """
+        dates = pd.to_datetime(["2024-01-01", "2024-01-02",
+                                "2024-01-03", "2024-01-04"])
+        assets = list("ABCDEFGH")
+        vals = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+        factor = pd.Series(vals, index=pd.MultiIndex.from_product([dates, assets]))
+        prices = pd.DataFrame(np.linspace(1, 2, 32).reshape(4, 8),
+                              index=dates, columns=assets)
+        prices.index = prices.index.tz_localize(None)
+        return factor, prices
+
+    def test_换手率必须覆盖真实标签(self) -> None:
+        """run_tear_sheet 的换手均值 = 按**全部真实标签**逐档重算的均值（真守护）。
+
+        🔴 还原 bug 版（tr 覆盖 ``range(1, nunique+1)``）必须让本用例 FAILED：
+           因子只有 {0,1} + bins=3 → 标签 [1,3]（Q2 幽灵档）；旧循环覆盖
+           {Q1, 幽灵 Q2}，幽灵档 quantile_turnover 返回空 Series 被 skipna 吞掉，
+           turnover_mean 实际只等于 Q1 换手 —— Q3 档换手根本没进统计。
+
+        ⚠️ 旧用例断言 ``quantile_turnover(...) is not None``（q=99 也非 None，恒真）
+           且从不调用被测函数 run_tear_sheet —— 还原 bug 版照样绿，是橡皮章。
+           本用例改为实跑 run_tear_sheet，与独立重算对拍，并自带反证
+          （断言旧新两式在本面板上数值不等，证明判据真的能分辨）。
+        """
+        from alphalens.performance import quantile_turnover
+        from alphalens.utils import get_clean_factor_and_forward_returns
+        from factor_lab.analysis.alphalens_adapter import run_tear_sheet
+        from factor_lab.config import DEFAULT_COST, ResearchConfig
+
+        factor, prices = self._turn_panel()
+        clean = get_clean_factor_and_forward_returns(
+            factor, prices, quantiles=None, bins=3, periods=[1], max_loss=0.5)
+        labels = sorted(int(x) for x in clean["factor_quantile"].unique())
+        assert labels == [1, 3], f"面板前提变了（应跳号 [1,3]）：{labels}"
+
+        tr = {q: quantile_turnover(clean["factor_quantile"], q) for q in labels}
+        expect = float(pd.DataFrame(tr).mean().mean())
+
+        cfg = ResearchConfig(periods=(1,))
+        r = run_tear_sheet(factor, prices, cfg, DEFAULT_COST,
+                           factor_name="turn_probe", bins=3)
+        assert r.turnover_mean == pytest.approx(expect, rel=1e-12), (
+            f"换手均值未覆盖全部真实标签：run_tear_sheet={r.turnover_mean}，"
+            f"按标签 {labels} 重算={expect}")
+
+        # 反证（尺子自证）：旧公式在同一面板上必须给出不同的数值，
+        # 否则本用例分辨不出真假、失去守护意义。
+        legacy = float(pd.DataFrame(
+            {q: quantile_turnover(clean["factor_quantile"], q)
+             for q in range(1, clean["factor_quantile"].nunique() + 1)}
+        ).mean().mean())
+        assert legacy != pytest.approx(expect, rel=1e-9), (
+            f"面板区分不开新旧公式（同值 {expect}），用例失效 —— 换转动面板")
 
 
 class TestUniverseListDays:
@@ -287,7 +340,10 @@ class TestUniverseListDays:
         from factor_lab.data.universe import build_universe
 
         long = self._long(242)
+        # 用例自带交易日历（与长表日期一致），避免依赖 runtime/ 产物，
+        # 且计龄口径与真实交易日语义一致（bdate_range 即本用例的日历）
         out = build_universe(long, ResearchConfig(), info=self._info(),
+                             trade_cal=pd.DatetimeIndex(sorted(long["date"].unique())),
                              verbose=False)
         assert len(out) == 242, f"老股票被误判为新股，剩 {len(out)}/242 行"
 
@@ -299,7 +355,9 @@ class TestUniverseListDays:
         long = self._long(242)
         # 上市日= 2024-03-01（窗口内第 21 个交易日）
         out = build_universe(long, ResearchConfig(),
-                             info=self._info(list_date=20240301), verbose=False)
+                             info=self._info(list_date=20240301),
+                             trade_cal=pd.DatetimeIndex(sorted(long["date"].unique())),
+                             verbose=False)
         # 满 250 天的行不存在 → 全部淘汰
         assert len(out) == 0, f"次新股未被淘汰，剩 {len(out)} 行"
 
@@ -310,5 +368,7 @@ class TestUniverseListDays:
 
         long = self._long(300)
         out = build_universe(long, ResearchConfig(),
-                             info=self._info(list_date=20240102), verbose=False)
+                             info=self._info(list_date=20240102),
+                             trade_cal=pd.DatetimeIndex(sorted(long["date"].unique())),
+                             verbose=False)
         assert len(out) == 50, f"应保留 300−250=50 行，实际 {len(out)}"
