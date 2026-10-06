@@ -204,6 +204,49 @@ fina_indicator 429,236 → 248,605（-40,334）
 
 ---
 
+---
+
+## S10 关键词法在金融字段上不可用 🔴 **两次都踩**
+
+判断「某列是不是金额」时，初版用列名关键词猜 —— **误判率极高**。
+
+**第一版：含金额词就换算**
+```
+assets_turn（资产周转率）    含 assets → 被误换算
+assets_yoy（资产同比增速）  含 assets → 被误换算
+debt_to_assets（资产负债率）含 assets → 被误换算
+bps（每股净资产，元/股）  必须 /1e8 → 实际没换
+fina_indicator 一张表误判 5 列
+```
+
+**第二版：手写白名单** —— 30 个列名是**凭记忆写的、实际不存在**
+（`accounts_payable` 实际叫 `acct_payable`、`currency_borr` 实际叫 `cb_borr`…），
+而真实存在却漏写的金额列会**静默漏换算**，后果与不换算完全一样。
+
+**第三版（可用）：脚本从真实 parquet 推导**
+```python
+# build_money_whitelist.py —— 接口版本变化时重跑，不手写
+for c in df.columns:
+    if c in NOT_MONEY_EXACT:            # 显式排除
+        continue
+    if NOT_MONEY_PATTERNS.search(c):    # 排除规则只用于「确定不是金额」
+        continue
+    if df[c].dtype.kind in "if":# 只取数值列
+        cols.append(c)
+```
+
+**核心教训：关键词只能用来「排除确定不是金额的」，
+不能用来「判断是金额」。** 金融字段的命名无法可靠推断。
+
+**排除规则要覆盖前缀形式** ——实测踩过：
+`^eps$` 匹配不到 `basic_eps` / `diluted_eps`，两者都是每股指标，
+误/1e8 会变成 2e-6。
+
+⚠️ 生成后仍需人工抽查：白名单挡不住「名字里没有金额词但单位是元」的字段
+（`ebit` / `ebitda` 就是这种）。
+
+---
+
 ## 相关模块
 
 | 内容 | 位置 |
@@ -214,6 +257,11 @@ fina_indicator 429,236 → 248,605（-40,334）
 | 下载账本 | `runtime/tushare/_download_manifest.json` |
 | 质量校验 | `research/scripts/verify_tushare_data.py` |
 | 复权因子专项校验 | `research/scripts/verify_adjusted_data.py` |
+| **全量质量门禁** | `research/scripts/verify_tushare_full.py` |
+| **数据清洗** | `research/scripts/clean_tushare_data.py` |
+| **并入本机库** | `research/scripts/merge_tushare_tables.py` |
+| **金额列白名单生成** | `research/scripts/build_money_whitelist.py` |
+| 工具链测试 | `tests/test_tushare_pipeline.py` |
 
 ---
 
