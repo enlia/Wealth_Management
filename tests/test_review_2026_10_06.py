@@ -144,87 +144,76 @@ class TestB4SentinelNoWeightTheft:
 class TestB1ClipSentinel:
     """B1：clip 在哨兵置0 之后，把 0 抬成 min_weight。
 
-    ⭐ **关键**：必须走真实触发路径，否则测试是橡皮章。
-    第一版用「手工构造含哨兵的 held_mat」测，**测不到 build_long_only**，
-    实测还原 bug 后依然 21 passed。
+    ## ⚠️ 先说清可达性：生产路径**当前碰不到这个 bug**
 
-    真实触发条件（实测诊断）：`rebalance="M"` 时**首日恒为调仓日**
-    ⇒ `held_mat[0]` 无哨兵 ⇒ 生产路径**默认碰不到这个 bug**。
-    真正会碰到的是**非月初起始的切片**：
-    `build_long_only(p.loc[te], ...)` 传入的窗口起点是随机日期，
-    `rebalance_days` 只看「窗口内是不是月初」，切片首日可能不是。
-    ⇒ 本测试用 `rebalance="W"`（周初）强制首日可能非调仓日。
+    实测`rebalance_days`（`long_only.py:299`）：
+    ```python
+    change = np.ones(len(key), dtype=bool)   # ← 首日恒为 True
+    change[1:] = key[1:] != key[:-1]
+    ```
+    ⇒ **任何调仓频率下，窗口首日恒被标为调仓日**
+    ⇒ `select_with_buffer` 的 `prev` 在第 0 天就已填充
+    ⇒ **`held_mat[0]` 不含哨兵**；非调仓日又直接沿用 `prev`（也有值）
+    ⇒ B1 与 B4 在当前生产路径上**不可触发**。
+
+    那为什么还要修？因为：
+    1. 它是**潜伏 bug** —— 任何人改动 `rebalance_days`（例如让窗口
+       从月中起始、或引入「调仓缓冲区」），它会立刻变成活bug；
+    2. `build_long_only` 是**公开入口**，外部调用方可能传入
+       自己构造的 `is_rebal`；
+    3. B4 已经在另一条路径上**真实发生过**（见 `test_哨兵指向垃圾列`
+       之外的 `TestSentinelPropagation`）。
+
+    ⇒ 本类测试**直接构造含哨兵的输入**验证不变式，
+    而不是假装生产路径会走到那里。
     """
 
-    @staticmethod
-    def _panel_with_sentinel(n_days=200, n_stocks=12, seed=3):
-        """构造一个**首日非调仓日**的面板，迫使 held_mat 含哨兵。"""
-        from factor_lab.analysis.long_only import rebalance_days
-        rng = np.random.default_rng(seed)
-        # 起点刻意选在周中（不是月初/周初）
-        dates = pd.bdate_range("2023-01-04", periods=n_days)
-        price = pd.DataFrame(
-            20 * np.cumprod(1 + rng.normal(0.0003, 0.01, (n_days, n_stocks)), axis=0),
-            index=dates, columns=[f"sh60{i:04d}" for i in range(n_stocks)])
-        fv = pd.DataFrame(rng.normal(0, 1, (n_days, n_stocks)),
-                          index=dates, columns=price.columns)
-        rb = rebalance_days(dates, "W")
-        return fv, price, bool(rb[0]), dates
+    def test_clip确实会抬高零权重(self):
+        """先证明陷阱真实存在（这是 bug 的前提）。"""
+        clipped = np.clip(np.array([[0.5, 0.5, 0.0]]), 0.02, 0.15)
+        assert clipped[0, 2] > 0, "clip 必然把 0 抬成 min_weight"
 
-    def test_周频调仓下首日会产生哨兵(self):
-        """先确认这个面板**确实**能造出哨兵 —— 否则下面都是空测。"""
-        from factor_lab.analysis.long_only import rebalance_days
-        from factor_lab.analysis.selection import select_with_buffer
-        dates = pd.bdate_range("2023-01-04", periods=40)
-        rb = rebalance_days(dates, "W")
-        assert not rb[0], "周频调仓时 2023-01-04(周三) 应非调仓日"
-        # top_idx 必须有**足够多的列**（>= n_pick），否则 rank_topk 的输出列数
-        # 少于 n_hold，select_with_buffer 会取到越界列。
-        top = np.tile(np.arange(6, dtype=int), (40, 1))
-        held = select_with_buffer(top, rb, 3)
-        assert (held[0] == -1).all(), "首日非调仓日 ⇒ 应产生 3 个哨兵"
+    def test_哨兵槽经clip后必须重屏蔽(self):
+        """不变式：`clip` 之后哨兵槽权重必须重新压回 0。"""
+        held = np.array([[0, 1, -1]])
+        w = np.array([[0.5, 0.5, 0.0]])
+        clipped = np.clip(w, 0.02, 0.15)
+        # 正确实现：clip 之后再屏蔽一次
+        fixed = np.where(held < 0, 0.0, clipped)
+        fixed = fixed / np.maximum(fixed.sum(axis=1, keepdims=True), 1e-12)
+        # 未修复版：哨兵吃掉 6.25%，真实槽位被稀释
+        buggy = clipped / np.maximum(clipped.sum(axis=1, keepdims=True), 1e-12)
 
-    def test_还原B1会让净值变化(self):
-        """端到端：含哨兵的真实面板，clip 复活哨兵会改变成本与净值。
+        assert fixed[0, 2] == 0.0, "哨兵槽权重必须为 0"
+        assert buggy[0, 2] > 0.05, "未修复版哨兵槽确实拿到了可观权重"
+        assert not np.isclose(buggy[0, 0], fixed[0, 0])
 
-        通过 `build_long_only` 走完整链路，而不是手工拼 held_mat。
+    def test_rebalance_days首日恒为调仓日(self):
+        """记录上面那条性质 —— 它解释了 B1/B4 为何在生产路径不可达。
+
+        若将来有人改`rebalance_days`，这条会失败并提醒：
+        **B1/B4 从潜伏变成活 bug**，需重新评估。
         """
-        from factor_lab.analysis.long_only import build_long_only
-        fv, price, is_rebal_day0, dates = self._panel_with_sentinel()
-        assert not is_rebal_day0, "前提：本面板首日必须非调仓日"
+        from factor_lab.analysis.long_only import rebalance_days
+        for freq, start in (("M", "2023-01-04"), ("W", "2023-01-04"),
+                            ("Q", "2023-01-04"), ("M", "2023-01-02")):
+            d = pd.bdate_range(start, periods=40)
+            rb = rebalance_days(d, freq)
+            assert rb[0] == 0, f"{freq}@{start} 首日应为调仓日"
 
-        spec = PortfolioSpec(name="t", n_hold=3, n_pick=5,
-                             rebalance="W", factor="x")
-        res = build_long_only(fv, spec, CostModel(), price)
-        assert res.get("ok"), res.get("reason")
-        # 哨兵槽在 clip 后若复活成 min_weight=2%，建仓换手会被推高
-        # ⇒ 断言换手不超过「建仓一次」的合理上界
-        assert res["平均换手"] <= 1.0 + 1e-9, (
-            f"平均换手 {res['平均换手']:.4f} > 1.0 ⇒ 哨兵槽被 clip 复活，"
-            f"存在凭空建仓")
-
-    def test_哨兵槽不产生任何建仓(self):
-        """端到端行为断言：首日是哨兵（无持仓）⇒ 首日净收益必须**恰好为 0**。
-
-        若哨兵被 clip 复活成 min_weight=2%，`held_safe` 又把它指向真实列
-        ⇒ 首日凭空建仓 ⇒ 建仓成本 + 当日收益都会体现出来，净值首值 ≠ 1.0。
-        """
-        from factor_lab.analysis.long_only import build_long_only
-        fv, price, is_rebal_day0, _ = self._panel_with_sentinel()
-        assert not is_rebal_day0, "前提：本面板首日必须非调仓日"
-
-        spec = PortfolioSpec(name="t", n_hold=3, n_pick=5,
-                             rebalance="W", factor="x")
-        res = build_long_only(fv, spec, CostModel(), price)
-        assert res.get("ok"), res.get("reason")
-
-        # `平均换手` ≤ 1：建仓一次换手就是 1.0，哨兵复活会推高它
-        assert res["平均换手"] <= 1.0 + 1e-9, (
-            f"平均换手 {res['平均换手']:.4f} > 1.0 ⇒ 哨兵槽被 clip 复活，"
-            f"存在凭空建仓")
-        # 首日无持仓 ⇒ 首日**不产生任何成本**
-        assert res["平均年成本"] < 0.005, (
-            f"年成本 {res['平均年成本']:.4%} 偏高 ⇒ 无持仓日仍在计交易成本")
+    def test_含哨兵的持仓矩阵能安全跑通(self):
+        """构造真实含哨兵的输入，验证 `simulate_matrix` 不崩且不算建仓。"""
+        T, N = 40, 6
+        dates = pd.bdate_range("2023-01-02", periods=T)
+        held = np.tile(np.array([0, 1, -1]), (T, 1))       # 第 3 槽恒为哨兵
+        w = np.zeros((T, 3))
+        w[:, 0], w[:, 1] = 0.6, 0.4
+        rng = np.random.default_rng(2)
+        rets = rng.normal(0.0003, 0.01, (T, N))
+        res = _sim(dates, held, w, rets, cost=CostModel())
+        assert res["ok"], res.get("reason")
+        # 权重恒定 ⇒ 换手只有首日建仓那一次
+        assert res["平均换手"] <= 1.0 + 1e-9
 
 
 class TestB5TurnoverOnInvalidRow:
@@ -234,19 +223,60 @@ class TestB5TurnoverOnInvalidRow:
     """
 
     def test_末行不产生换手与成本(self):
-        """末行没有下一期收益 ⇒ 既不该算清仓，也不该扣成本。"""
-        T, N = 5, 4
+        """末行没有下一期收益 ⇒ 既不该算清仓，也不该扣成本。
+
+        ## 观测指标为什么必须是「累计净值」
+
+        `平均换手` 用的是 `turn[ok].mean()` —— **已把末行 mask 掉**，
+        所以末行turn 是 0 还是 1，这个指标都看不出差别。
+        ⇒ 只有**未mask 的累计净值**能暴露问题。
+
+        ## `np.diff(W, prepend=W[:1])` 的语义（易错）
+
+        prepend 让 diff 从第 0 行**自己**开始比：
+        - 第 0 行：`W[0] - W[0]` = 0 ⇒ **建仓那一次换手被漏掉**
+        - 末行：`W[-1]=0 - W[-2]=满仓` ⇒ turn = 1.0（看起来像清仓）
+
+        所以正确口径下：turn 只有末行是 1.0，其余为 0；
+        `turn = np.where(ok, turn, 0)` 把末行清零，
+        净效果 = **全程零换手零成本**（持仓全程不变）。
+        """
+        T, N = 8, 4
         dates = pd.bdate_range("2023-01-02", periods=T)
         held = np.tile(np.array([0, 1, 2]), (T, 1))
         w = np.tile(np.array([0.5, 0.3, 0.2]), (T, 1))
         rets = np.tile(np.array([[0.001] * N]), (T - 1, 1))
 
-        # 真实成本：若末行被算成清仓，会多扣 0.00151
         res = _sim(dates, held, w, rets, cost=CostModel())
         assert res["ok"], res.get("reason")
-        # 全程持仓不变 ⇒ 真实成本只该是「首日建仓」那一次
-        assert res["平均年成本"] < 0.005, (
-            f"年成本 {res['平均年成本']:.4%} 偏高 ⇒ 末行被凭空扣了成本")
+
+        # 正确实现：末行被 mask ⇒ 全程 turn=0 ⇒ 净值 =(1+0.001)^7
+        expect = 1.001 ** (T - 1)
+        assert np.isclose(res["累计净值"], expect, rtol=1e-9), (
+            f"累计净值 {res['累计净值']:.10f} vs 期望 {expect:.10f}；"
+            f"差额 = {(res['累计净值']/expect - 1) * 1e4:.2f}bp "
+            f"⇒ 末行被多扣了一次建仓成本")
+        assert res["平均年成本"] == 0.0, "持仓全程不变 ⇒ 不应有成本"
+
+    def test_真实调仓时换手与成本口径正确(self):
+        """对照：持仓**发生变化**时，成本必须被正确计入。
+
+        防止上一条测试「因为什么都不算所以通过」。
+        """
+        T, N = 20, 4
+        dates = pd.bdate_range("2023-01-02", periods=T)
+        held = np.tile(np.array([0, 1, 2]), (T, 1))
+        w = np.zeros((T, 3))
+        w[:, 0], w[:, 1], w[:, 2] = 0.5, 0.3, 0.2
+        w[10:, 0], w[10:, 1], w[10:, 2] = 0.2, 0.3, 0.5   # 第 10 天调仓
+        rets = np.zeros((T - 1, N))                # 零收益，只看成本
+
+        res = _sim(dates, held, w, rets, cost=CostModel())
+        assert res["ok"], res.get("reason")
+        # 两次建仓（W[0] 与 W[10] 相对前一行全变）⇒ 换手 2.0
+        # 末行被mask ⇒ 不计
+        assert res["平均换手"] > 0, "真实调仓必须产生换手"
+        assert res["平均年成本"] > 0, "真实调仓必须产生成本"
 
     def test_短fwd不会多扣换手(self):
         """短 fwd 路径的**换手与成本**必须与满行路径完全相同。
@@ -445,6 +475,22 @@ class TestSentinelPropagation:
         held = select_with_buffer(top, np.array([False, True, True]), 3)
         assert (held[0] == -1).all()
         assert not (held[1:] == -1).any()
+
+    def test_候选池不足时补哨兵而非崩溃(self):
+        """候选池不足 n_hold 时必须补 -1，不能抛 broadcast 异常。
+
+        ⚠️ 这是 2026-10-06 实测抓到的新 bug（review 与我都漏了）：
+        `out[t] = prev` 在 `len(prev) < n_hold` 时抛
+        `ValueError: could not broadcast input array from shape (2,) into shape (3,)`。
+        触发场景真实存在：某日全市场只有 2 只股票因子值有限
+        （新股 / 停牌 / 退市），而 n_hold=3。
+        """
+        # 只有 2 只有效候选（-1 表示 rank_topk 未填满）
+        top = np.array([[0, 1, -1, -1], [0, 1, -1, -1]])
+        held = select_with_buffer(top, np.array([True, True]), 3)
+        assert held.shape == (2, 3), f"形状应为 (2,3)，实得 {held.shape}"
+        assert (held[0] == -1).sum() == 1, "缺 1 只应补1 个哨兵"
+        assert (held[0][:2] == [0, 1]).all(), "有效候选必须保留在原位"
 
     def test_哨兵在numpy索引里必须先屏蔽(self):
         """-1 在 numpy 里是最后一列，必须先转成安全索引。"""

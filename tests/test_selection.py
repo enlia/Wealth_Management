@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
 
 from factor_lab.analysis.selection import (  # noqa: E402
     rank_topk,
@@ -190,6 +191,55 @@ class TestLongOnlyDataDeps:
             f"因子无法计算: {failed}\n"
             f"  ⚠ 这类失败在批量跑时表现为「跑到该因子就崩」，"
             f"  容易被误认为因子本身有问题，实际是取数缺依赖列。")
+
+class TestWarmupWindow:
+    """跨年预热必须按【交易日】算，不能用自然日。"""
+
+    def test_预热按交易日而非自然日(self):
+        """⚠️ **实测踩过的静默丢数据缺陷**：
+        初版用 `pd.Timedelta(days=260)` 减**自然日**，
+        260 自然日 ≈ **173 个交易日**，而 `pos250` 需要 **250 个交易日** ——
+        预热少了约 77 个交易日。
+
+        实测：`_shift_date('20240101', -260)` 返回 `20230416`，
+        正确应是 `20230102`。
+
+        后果：pos250 / mom120 在每年年初缺 ~77 个交易日因子值，
+        11 年累积约 **850 天（3.3 年）数据被静默丢弃**。
+        不报错、不影响其他因子，只让长窗口因子样本变少 ——
+        这类缺陷最难发现。
+        """
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "research" / "scripts"))
+        from run_long_only import _shift_date
+        got = _shift_date("20240101", -260)
+        assert got <= "20230103", (
+            f"预热起点 {got} 太晚 —— 应覆盖到 2023-01-02 左右。"
+            f"按自然日推算会只回退约 173 个交易日，"
+            f"而 pos250 需要 250 个交易日。")
+
+    def test_预热天数足够覆盖最长窗口(self):
+        """WARMUP_TRADING_DAYS 必须 >= 最长因子窗口。"""
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "research" / "scripts"))
+        from run_long_only import WARMUP_TRADING_DAYS
+        from factor_lab.factors.price_volume import FACTORY
+        # 从注册表里挖出所有窗口参数的最大值
+        import re
+        src = (ROOT / "src" / "factor_lab" / "factors"
+               / "price_volume.py").read_text(encoding="utf-8")
+        nums = [int(m) for m in re.findall(r'FACTORY.*?(\d+)', src)]
+        reg = re.search(r"FACTORY.*?\n\}", src, re.S)
+        assert reg, "读不到 FACTORY"
+        windows = [int(m) for m in
+                   re.findall(r'lambda d: \w+\(d,\s*(\d+)', reg.group(0))]
+        windows += [int(m) for m in
+                    re.findall(r'lambda d: \w+\(d,\s*\d+,\s*(\d+)', reg.group(0))]
+        if windows:
+            assert WARMUP_TRADING_DAYS >= max(windows), (
+                f"预热 {WARMUP_TRADING_DAYS} <最长窗口 {max(windows)}，"
+                f"长窗口因子在年初会缺数据")
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

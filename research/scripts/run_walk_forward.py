@@ -66,7 +66,7 @@ def run_windows(panels: dict, price: pd.DataFrame, factor: str,
     #   对齐后基准 -9.57% ⇒ **仅因边界错位，基准年化偏 -1.44%**。
     #   等权基准在 A 股多数年份上涨 ⇒ 基准偏高 ⇒ **所有超额被系统性低估**。
     #   而「超额」是本脚本全部结论的唯一判据。
-    bench_full = price.pct_change(fill_method=None).mean(axis=1)
+    #   ⇒ 正确做法在循环内：`price.loc[te].pct_change()`（窗口内重算）。
     p = panels[factor]
     dates = sorted(set(p.index) & set(price.index))
     p = p.loc[dates]
