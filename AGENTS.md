@@ -60,18 +60,20 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | 文件                                 | 内容                               | 行数 |
 | ------------------------------------ | ---------------------------------- | ---- |
 | `.github/standards/ENGINEERING.md` | **工程规范全文，最高优先级** | —  |
-| `.github/standards/PITFALLS.md`    | 金融与数据踩坑（20 条，6 条结论反转） | —  |
+| `.github/standards/PITFALLS.md`    | 金融与数据踩坑（P1~P18，6 条结论反转） | 431 |
+| `.github/standards/UNITS.md`         | **单位与量纲（U1~U2）** | 83 |
 | `.github/standards/TOOLING.md`     | 工具链踩坑（lint / git / CI / 依赖）  | —  |
 | `.github/standards/DATA_QUALITY.md` | **判据设计踩坑（Q1~Q12）** | 321 |
 | `.github/standards/DATA_SOURCE.md`  | **外部数据源 API 踩坑（S1~S10）** | — |
 
-**三类踩坑的排查手法不同，别混用**：
+**四类踩坑的排查手法不同，别混用**：
 
 | 类别 | 怎么看 |
 |---|---|
 | `ENGINEERING` | 读代码，看结构与约束 |
 | `DATA_QUALITY` | **找反例** —— 怀疑判据本身错了 |
 | `DATA_SOURCE` | **实测接口** —— 文档说的可能和实际不一样 |
+| `UNITS` | **找已知真值反推** —— 数字看着合理不代表量纲对 |
 
 ---
 
