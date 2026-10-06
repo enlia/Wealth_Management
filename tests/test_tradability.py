@@ -191,9 +191,24 @@ class TestCoverageReport:
         txt = coverage_report(close, up, "test")
         assert "真封涨停率" in txt
         assert "北交所" in txt and "沪主板" in txt
-        # 北交所覆盖率应为 0%
-        line = [ln for ln in txt.splitlines() if "北交所" in ln][0]
-        assert "0.00%" in line, f"北交所未覆盖应报 0%，实际: {line}"
+
+        # ⚠️ **核心判据：零覆盖列绝不能被算成「100% 封板」**。
+        #   若混进去，北交所那几列会以「全部不可交易」的形式
+        #   把整体封板率虚高 —— 实测该缺陷曾让 2023 年整体封板率
+        #   报成 37%（真值0.50%）。
+        #   正确做法：显式报出「零覆盖列」并从板块统计中排除。
+        assert "零涨跌停价列" in txt, \
+            "必须显式报出零覆盖列，否则缺数据会被当成封板"
+        assert "4/8" in txt, f"零覆盖列数应报出 4/8，实际: {txt}"
+
+        # 沪主板全覆盖部分：真封涨停率应为 0（close=10 远低于 up=11）
+        line = [ln for ln in txt.splitlines() if "沪主板" in ln][0]
+        assert "0.000%" in line, f"沪主板未封板应报 0%，实际: {line}"
+
+        # ⚠️ **不能出现「北交所 …真封涨停率 100%」** —— 那是缺数据被当封板
+        bj = [ln for ln in txt.splitlines() if "北交所" in ln][0]
+        assert "100.00%" not in bj, (
+            f"北交所未覆盖却报 100% —— 缺数据被当成封板了: {bj}")
 
     def test_真封板率为零时明确提示(self):
         idx = pd.to_datetime(["2023-01-03"])

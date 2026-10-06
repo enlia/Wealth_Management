@@ -151,6 +151,8 @@ def build_long_only(
     spec: PortfolioSpec,
     cost: CostModel,
     price_panel: pd.DataFrame | None = None,
+    buy_ok: pd.DataFrame | None = None,
+    sell_ok: pd.DataFrame | None = None,
 ) -> dict:
     """构建单边多头组合并做样本内检验。
 
@@ -165,6 +167,10 @@ def build_long_only(
                     是 z 分数（可为负、可跨股票差 10 倍），
                     比值的分布毫无意义，实测单日收益出现 100 倍以上的值，
                     年化波动 33,494%、回撤 −261,897%，净值被打爆。
+    buy_ok/sell_ok: 索引=日期，列=代码的 bool 面板，
+                    True = 当日可买/ 可卖。None = 不施加涨跌停约束。
+                    ⚠️ **必须与 factor_values 的索引、列完全一致**，
+                       内部按下标对齐（`to_numpy`），列序不同会静默错配。
 
     返回
     ----
@@ -233,7 +239,37 @@ def build_long_only(
     #   参数扫描表「候选池大小」那一列数值一模一样 —— 那是假象。
     #   现在真正实现缓冲带语义：持仓股只要还在 top n_pick 内就不卖。
     top_idx = rank_topk(fv_for_top, n_pick)
-    held_mat = select_with_buffer(top_idx, is_rebal, n_hold)
+
+    # ⚠️⚠️ **涨跌停约束接在这里**（2026-10-06 接线，此前从未生效）：
+    #   `tradability.py` 建好了、`limit_masks` 有覆盖率自检，
+    #   但**全项目零生产调用方** —— 所有已披露结论都是在
+    #   「假设涨跌停板随时能成交」下得出的。
+    #   本项目的因子（反转）选的正是「刚跌过」的股票，
+    #   而跌停股恰恰是「跌得最狠、最卖不掉」的那一批 ⇒ 影响不是随机噪声。
+    #
+    #   ⚠️ **必须按下标对齐，不能靠 pandas 自动对齐**：
+    #     `buy_ok.to_numpy()` 的列序若与 `fv_mat` 不同，
+    #     第 i 个因子值会配上第 i 个涨跌停标记 —— 静默错配，不报错。
+    #     故显式 reindex 到 factor_values 的形状。
+    if buy_ok is not None or sell_ok is not None:
+        def _align(mask: pd.DataFrame | None) -> np.ndarray | None:
+            if mask is None:
+                return None
+            if mask.shape != factor_values.shape:
+                raise ValueError(
+                    f"涨跌停面板形状 {mask.shape} 与因子面板 "
+                    f"{factor_values.shape} 不一致，拒绝继续。\n"
+                    f"  静默 reindex 会让「第 i 个因子值」配到"
+                    f"「第 i 个涨跌停标记」，列序不同即错配且不报错。")
+            return mask.to_numpy(dtype=bool)
+
+        buy_m = _align(buy_ok)
+        sell_m = _align(sell_ok)
+    else:
+        buy_m = sell_m = None
+
+    held_mat = select_with_buffer(top_idx, is_rebal, n_hold,
+                                  buy_ok=buy_m, sell_ok=sell_m)
 
     inv = np.where(vol_mat > 0, 1.0 / vol_mat, np.nan)
     # ⚠️ **必须先把 -1 哨兵屏蔽掉**，不能用 clip(下界, 0) 代替：
