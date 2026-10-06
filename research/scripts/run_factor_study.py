@@ -11,16 +11,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from factor_lab.analysis.alphalens_adapter import run_tear_sheet, subperiod_ic
 from factor_lab.config import DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR, is_a_share
@@ -140,6 +141,7 @@ def main() -> int:
     names = [n.strip() for n in args.factors.split(",") if n.strip()]
     print(f"\n[4/5] 检验 {len(names)} 个因子: {', '.join(names)}")
     results = []
+    failed: list[str] = []
     out_dir = Path(args.out) if args.out else OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -163,6 +165,15 @@ def main() -> int:
             r.ic_by_period.to_csv(out_dir / f"ic_{name}.csv", encoding="utf-8-sig")
         except Exception as e:  # noqa: BLE001
             print(f"  ✗ 失败: {type(e).__name__}: {e}")
+            failed.append(name)
+
+    # ⚠️ 失败名单必须在**结尾汇总打印**（2026-10-06 review 抓出）。
+    #   因子一多，输出会很长，「4 个因子只跑了 2 个」在中间看不出来 ——
+    #   而汇总表只列成功的，读者会以为那就是全部。
+    if failed:
+        print(f"\n⚠️ {len(failed)}/{len(names)} 个因子计算失败，未进入汇总表：")
+        for n in failed:
+            print(f"    ✗ {n}")
 
     # ── 5. 子区间稳定性 ─────────────────────────────────────
     print("\n[5/5] 子区间稳定性检验（AGENTS.md 强制）")
@@ -201,6 +212,27 @@ def main() -> int:
         allsub = pd.concat(sub_tables, ignore_index=True)
         allsub.to_csv(out_dir / "subperiod_ic.csv", index=False, encoding="utf-8-sig")
         print("\n子区间结果已存 subperiod_ic.csv")
+
+    # ── 绑定数据版本：结论必须能说清「建立在什么数据上」──
+    # ⚠️ 没有这一步，半年后看到 IC=0.08 无法判断用的哪版数据，
+    #    数据一更新旧结论就悄悄失效了。
+    try:
+        from data_version import build_manifest
+        ver = build_manifest()
+        meta = {
+            "数据版本": ver["version"],
+            "打戳时间": ver["stamped_at"],
+            "因子": args.factors,
+            "股票池": "全市场" if args.all else f"{args.n} 只",
+            "区间": f"{args.start or '默认'} ~ {args.end or '默认'}",
+        }
+        (out_dir / "run_meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n数据版本: {ver['version']}  （已写入 run_meta.json）")
+        print(f"  Tushare {ver['totals']['ts_rows']:,} 行 / "
+              f"本机库 {ver['totals']['db_rows']:,} 行")
+    except Exception as e:                                   # noqa: BLE001
+        print(f"⚠ 无法写入数据版本信息: {e}")
 
     print(f"\n结果目录: {out_dir}")
     print("提示: 以上为技术形态与价量因子的统计检验，不构成投资建议。")
