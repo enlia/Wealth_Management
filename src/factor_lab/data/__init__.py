@@ -11,6 +11,7 @@ from .sqlite_source import (
     load_stock_info,
     load_weekly,
 )
+from .trade_cal import load_trade_cal
 
 __all__ = [
     "all_codes",
@@ -21,5 +22,6 @@ __all__ = [
     "load_sector_members",
     "load_sectors",
     "load_stock_info",
+    "load_trade_cal",
     "load_weekly",
 ]

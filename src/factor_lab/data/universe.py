@@ -13,12 +13,14 @@ import pandas as pd
 
 from ..config import ResearchConfig, is_a_share
 from .sqlite_source import load_first_dates
+from .trade_cal import load_trade_cal
 
 
 def build_universe(
     long: pd.DataFrame,
     cfg: ResearchConfig,
     info: pd.DataFrame | None = None,
+    trade_cal: pd.DatetimeIndex | None = None,
     first_dates: pd.Series | None = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -31,12 +33,16 @@ def build_universe(
       4. 20 日均成交额 ≥ 5000 万（流动性陷阱：无法在涨停时买入）
       5. 剔除 ST（从名称判断）
 
-    ⚠️ 「上市满 N 个交易日」的边界口径（钉死，勿改回）：
+    ⚠️ 「上市满 N 个交易日」的口径（钉死，勿改回）：
        · 计龄基准 = ``stock_info.list_date``；该股缺 list_date 时按**表内首日**
         （详见 ``_listing_base``，逐级打印受影响计数）。
+       · 交易日序号取自**权威交易日历**（``trade_cal`` 参数；缺省读
+         ``runtime/tushare/trade_cal.parquet``，Tushare trade_cal 口径），
+         不取输入长表的日期并集 —— 大缺口会把并集压缩（UNITS U4 同源教训）。
        · 上市当天计龄 0；计龄 ≥ cfg.min_list_days 当天即合格
         （=「上市当天算第 1 日」口径下的第 N+1 个交易日）。
-       · 计龄基准早于窗口起点 → 窗口内每一天都已判满，直接合格。
+       · 计龄基准早于交易日历起点 → 覆盖不到的更早交易日无法计数，
+         按已满计并打印受影响计数（据实声明的口径）。
     """
     n0 = len(long)
     d = long[long["code"].map(is_a_share)].copy()
@@ -61,7 +67,8 @@ def build_universe(
         # 把 NaN 换成真实位置 0（``.where(_in_win, 0)``），退化分支成死代码，
         # 缺 list_date 的真次新股上市首日即进池、缺 list_date 的老股短窗全灭。
         # 计龄基准解析见 ``_listing_base``，计龄判定见 ``_listing_age_ok``。
-        d = d[_listing_age_ok(d, cfg, info, first_dates=first_dates)]
+        d = d[_listing_age_ok(d, cfg, info,
+                              trade_cal=trade_cal, first_dates=first_dates)]
     steps.append(("上市满1年", m2, len(d)))
 
     m3 = len(d)
@@ -186,19 +193,33 @@ def _listing_base(
     return base, has_ld
 
 
+def _resolve_trade_cal(trade_cal: pd.DatetimeIndex | None) -> pd.DatetimeIndex:
+    """解析权威交易日历（缺省读 trade_cal.parquet），返回升序去重 DatetimeIndex。"""
+    cal = trade_cal if trade_cal is not None else load_trade_cal()
+    cal = pd.DatetimeIndex(pd.to_datetime(pd.Index(cal)))
+    cal = pd.DatetimeIndex(sorted(pd.DatetimeIndex(cal).unique()))
+    if len(cal) == 0:
+        raise ValueError("交易日历为空，无法按真实交易日计算上市年限（不做自然日近似）")
+    return cal
+
+
 def _listing_age_ok(
     d: pd.DataFrame,
     cfg: ResearchConfig,
     info: pd.DataFrame | None,
+    trade_cal: pd.DatetimeIndex | None = None,
     first_dates: pd.Series | None = None,
 ) -> pd.Series:
     """逐行判定「上市满 cfg.min_list_days 个交易日」，返回 keep 布尔掩码。
 
-    边界口径（钉死，勿改回）：
+    计龄口径（钉死，勿改回）：
+      · 计龄基准见 ``_listing_base``；交易日序号取自 ``_resolve_trade_cal``
+        的**权威交易日历**，不取输入长表的日期并集 ——
+        单股/长停牌的大缺口会把并集压缩：实测真实计龄 250+ 交易日的样本
+        被数成 189 而全灭（不报错），UNITS U4 的 BDay 近似同理不可用；
       · 上市当天计龄 0；计龄 ≥ cfg.min_list_days 当天即合格；
-      · 计龄基准早于窗口起点 → 窗口内每一天都已判满，直接合格
-        （这不是精确数龄而是**据实声明的口径**：基准覆盖不到的更早交易日
-        无法计数，按已满计；受影响只数打印出来）。
+      · 计龄基准早于交易日历起点 → 覆盖不到的更早交易日无法计数，
+        按已满计并打印受影响计数（据实声明的口径，不是精确数龄）。
     """
     base, has_ld = _listing_base(d, info, first_dates=first_dates)
     if base.isna().any():
@@ -206,20 +227,33 @@ def _listing_age_ok(
             f"{int(base.isna().sum())} 行计龄基准日缺失（_listing_base 阶梯未覆盖），"
             f"拒绝用 NaN 继续判定 —— NaN 一旦被换成占位值就会撞上真实日期（P22）")
 
-    # ⚠️ 计龄基准早于窗口起点 → 合格，不能拿窗口内序号去比 250 ——
-    #    窗口内序号上界就是窗口交易日数（2024 全年 242 天 < 250），
-    #    于是**每只股票都被淘汰**。本函数在这一点上栽过两次：
-    #      ① rank() 窗口内序号 → 短窗 100% 淘汰
-    #      ② 改按上市日计龄但把 NaN 哨兵换成真实位置 0 → 短窗该人群仍全灭
-    cal_np = pd.to_datetime(pd.Series(np.sort(d["date"].unique()))).to_numpy()
+    cal = _resolve_trade_cal(trade_cal)
+    cal_np = cal.to_numpy()
     dates_np = pd.to_datetime(d["date"]).to_numpy()
     base_np = base.to_numpy()
+    if len(dates_np) and (dates_np.min() < cal_np[0] or dates_np.max() > cal_np[-1]):
+        raise ValueError(
+            f"交易日历未覆盖判断区间："
+            f"日历 {pd.Timestamp(cal_np[0]):%Y-%m-%d} ~ {pd.Timestamp(cal_np[-1]):%Y-%m-%d}，"
+            f"数据 {pd.Timestamp(dates_np.min()):%Y-%m-%d} ~ "
+            f"{pd.Timestamp(dates_np.max()):%Y-%m-%d}。\n"
+            f"  上市年限按真实交易日计龄，日历不全会数错龄，拒绝用近似日历兜底。\n"
+            f"  处理：确认 runtime/tushare/trade_cal.parquet 覆盖该区间"
+            f"（uv run python research/scripts/fetch_all_tushare.py 生成），"
+            f"或显式传入覆盖完整区间的 trade_cal 参数。")
+
+    # ⚠️ 计龄基准早于日历起点时更早的交易日不可计数，按已满计并打印 ——
+    #    若改按日历位置从 0 数起，窗口起步段的老股会被误判为次新：
+    #    计龄序号上界=窗口交易日数（2024 全年 242 天 < 250），短窗全灭。
+    #    该人群在判据历史上连栽两次（rank() 序号版、哨兵占位版），勿改回。
     before = base_np < cal_np[0]
-    age = np.searchsorted(cal_np, dates_np) - np.searchsorted(cal_np, base_np)
+    age = (np.searchsorted(cal_np, dates_np)
+           - np.searchsorted(cal_np, base_np))
     ok = (age >= cfg.min_list_days) | before
     if before.any():
         n = int(d.loc[before, "code"].nunique())
-        print(f"  ℹ️ {n} 只计龄基准早于窗口起点，按已满 {cfg.min_list_days} 交易日计")
+        print(f"  ℹ️ {n} 只计龄基准早于交易日历起点，按已满 {cfg.min_list_days} 交易日计"
+              f"（基准更早的交易日不可计数，口径见 docstring）")
     return pd.Series(np.asarray(ok, dtype=bool), index=d.index)
 
 
