@@ -46,38 +46,46 @@ class TestListDateFallback:
     """
 
     @pytest.mark.parametrize("has_list_date", [True, False])
-    def test_真次新股250日保护必须生效(self, has_list_date: bool) -> None:
+    def test_暴露面1_bj920段缺list_date_次新250日保护(self, has_list_date: bool) -> None:
         """暴露面样本一：bj920 段（库内实测整段缺 list_date）的真次新股。
 
-        上市/数据起点 = 日历第 261 日（0 基），窗口内上市：
+        混窗夹具（还原真实触发形态）：同窗另有老股铺满整个窗口 600 日，
+        次新股行情从窗口第 261 个交易日才开始（数据随上市起步）。
         上市当天计龄 0 → 第 251 个交易日起合格，此前必须淘汰。
         有/无 list_date 两个变体的结果必须**完全一致**（保护语义一致）。
 
         还原 bug 版失败形态（缺 list_date 变体）：
-        哨兵把基准换成位置 0 → 计龄=全局窗口序号 → 340 行**全部首日进池**。
+        哨兵把基准换成位置 0 → 计龄=窗口全局序号 260..599（全部 ≥250）→
+        该股 340 行**全部首日进池**。
+        ⚠️ 单股夹具区分不出该形态（窗口序号从 0 数起，恰好与表内首日重合）——
+           必须用「晚起点混窗」的真实触发形态（CODE_TRUST P23-实例 4 教训）。
         """
         cal = pd.DatetimeIndex(pd.bdate_range("2024-01-02", periods=600))
         code = "bj920888"
-        days = cal[260:]                     # 上市第 1 天 = 日历第 261 个交易日
-        long = _long(code, days)
+        filler = "sh600100"                    # 同窗老股，铺满窗口
+        days = cal[260:]                       # 上市第 1 天 = 窗口第 261 个交易日
+        long = pd.concat([_long(filler, cal), _long(code, days)],
+                         ignore_index=True)
         ld = [float(pd.Timestamp(days[0]).strftime("%Y%m%d"))] if has_list_date else [None]
         # 真实 stock_info 里 944/8,728 只缺 list_date（bj920 段整段缺）——
         # 混合表形态：同表另有可解析上市日的股票
-        info = pd.DataFrame({"code": [code, "sh600519"],
-                             "name": ["北证次新", "贵州茅台"],
-                             "list_date": ld + [20010827.0]})
+        info = pd.DataFrame({"code": [code, "sh600519", filler],
+                             "name": ["北证次新", "贵州茅台", "老股样本"],
+                             "list_date": ld + [20010827.0, 20010104.0]})
         first = pd.Series({code: days[0]})
 
         out = build_universe(long, ResearchConfig(), info=info,
                              trade_cal=cal, first_dates=first, verbose=False)
 
+        mine = out[out["code"] == code]
         ok = days[250:]                      # 第 251 个交易日起合格
-        assert len(out) == len(ok) == 90, \
-            f"250 日保护失效：应保留 {len(ok)} 行，实际 {len(out)} 行"
-        assert pd.Timestamp(out["date"].min()) == days[250]
+        assert len(mine) == len(ok) == 90, \
+            f"250 日保护失效：应保留 {len(ok)} 行，实际 {len(mine)} 行"
+        assert pd.Timestamp(mine["date"].min()) == days[250]
+        assert len(out[out["code"] == filler]) == 600, "同窗老股应全保留"
 
     def test_缺list_date的老股短窗不得全灭(self) -> None:
-        """暴露面样本二：老股 + 短窗口（242 日 < 250）+ 缺 list_date（S4c 形态）。
+        """暴露面样本三：老股 + 短窗口（242 日 < 250）+ 缺 list_date（S4c 形态）。
 
         计龄基准取行情表（bar_daily）内该股首个数据日 = 2015-09-14（远早于窗口），
         短窗口内每一天都已满 250 交易日 → 242 行必须全保留。
@@ -136,24 +144,31 @@ class TestListDateFallback:
     def test_退化计龄同样执行250日保护(self) -> None:
         """退化基准（本表首日）计龄同样生效：数据晚起点的次新股不得首日进池。
 
-        还原 bug 版失败形态：计龄基准被换成位置 0 → 首日即合格（保护不存在）。
+        混窗夹具（同暴露面样本一的触发形态）：次新股行情集中在窗口尾段，
+        行级窗口序号 300..349 而表内计龄 0..49。
+
+        还原 bug 版失败形态：计龄基准被换成位置 0 → 窗口序号 300..349 全部
+        ≥250 → 50 行首日全进池（断言期望 0 行）。
         """
         cal = pd.DatetimeIndex(pd.bdate_range("2024-01-02", periods=400))
         code = "bj920883"                     # 行情表首日也没有 → 退到本表首日
-        days = cal[100:150]                   # 表内仅 50 行
-        long = _long(code, days)
+        filler = "sh600100"                   # 同窗老股，铺满窗口
+        days = cal[300:350]                   # 晚起点：表内仅 50 行
+        long = pd.concat([_long(filler, cal), _long(code, days)],
+                         ignore_index=True)
         info = pd.DataFrame({
-            "code": [code, "sh600519"],
-            "name": ["北证C", "贵州茅台"],
-            "list_date": [None, 20010827.0],
+            "code": [code, "sh600519", filler],
+            "name": ["北证C", "贵州茅台", "老股样本"],
+            "list_date": [None, 20010827.0, 20010104.0],
         })
 
         out = build_universe(long, ResearchConfig(), info=info,
                              trade_cal=cal,
                              first_dates=pd.Series(dtype="datetime64[ns]"),
                              verbose=False)
-        assert len(out) == 0, \
-            f"退化基准下 50 行全部未满 250 日，应 0 行，实际 {len(out)} 行"
+        mine = out[out["code"] == code]
+        assert len(mine) == 0, \
+            f"退化基准下 50 行全部未满 250 日，应 0 行，实际 {len(mine)} 行"
 
 
 class TestLoadFirstDates:
@@ -213,7 +228,7 @@ class TestUniverseNoSilentSkip:
         assert "1 只" in msg and "20 行" in msg, f"错误信息未给出计数：{msg}"
 
     def test_暴露面_sz301999类20日新股_info缺失不得静默进池(self) -> None:
-        """暴露面样本三：上市 20 天的 sz301999 + info 缺失。
+        """暴露面样本二：上市 20 天的 sz301999 + info 缺失。
 
         还原 bug 版失败形态：整段过滤静默跳过 → 20 行**全部进池**且零打印。
         """
