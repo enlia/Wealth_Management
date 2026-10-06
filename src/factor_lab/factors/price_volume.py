@@ -20,6 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..config import SCALING_TRADING_DAYS
+
 
 def _mk(values: pd.Series, codes: pd.Series, dates: pd.Series, name: str) -> pd.Series:
     """构造 alphalens 要求的 MultiIndex Series。
@@ -55,7 +57,7 @@ def _prep(long: pd.DataFrame) -> pd.DataFrame:
     return d.sort_values(["code", "date"], kind="stable").reset_index(drop=True)
 
 
-# 收益类因子统一用**后复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
+# 收益类因子统一用**前复权价**做口径，由 `PRICE_COLS` 声明每个价格位的列名。
 #
 # ⚠️ 为什么必须复权（AGENTS.md 第二节）
 #   未复权价在除权日出现假跳空：实测主板 0.291% 的日收益超过 ±10% 限制，
@@ -69,7 +71,7 @@ PRICE_COLS = {"close": "close_adj", "high": "high_adj", "low": "low_adj"}
 
 
 def _px(d: pd.DataFrame, field: str = "close") -> pd.Series:
-    """取价格序列，优先用后复权列。
+    """取价格序列，优先用前复权列。
 
     长表由 ``load_long(adjusted=True)`` 产出时才有 ``*_adj`` 列。
     若请求复权列但长表里没有，**直接报错** —— 静默退回未复权价
@@ -118,7 +120,7 @@ def reversal(long: pd.DataFrame, window: int = 5) -> pd.Series:
 
 # ── 风险类 ────────────────────────────────────────────────────
 def volatility(long: pd.DataFrame, window: int = 60, annualize: bool = True) -> pd.Series:
-    """N 日收益率标准差（滚动窗口），默认年化（×√244）。"""
+    """N 日收益率标准差（滚动窗口），默认年化（×√SCALING_TRADING_DAYS）。"""
     d = _prep(long)
     px = _px(d, "close")
     # ⚠️ fill_method=None：close_adj 有 1.6% 的行为空，默认的 ffill 会把
@@ -127,7 +129,7 @@ def volatility(long: pd.DataFrame, window: int = 60, annualize: bool = True) -> 
     v = d.groupby("code", sort=False)["ret"].rolling(window).std(ddof=1) \
          .reset_index(level=0, drop=True)
     if annualize:
-        v = v * np.sqrt(244)
+        v = v * np.sqrt(SCALING_TRADING_DAYS)
     return _mk(v, d["code"], d["date"], f"vol{window}")
 
 
@@ -146,7 +148,7 @@ def downside_volatility(long: pd.DataFrame, window: int = 60,
     d["neg"] = d["ret"].where(d["ret"] < 0, np.nan)
     v = d.groupby("code", sort=False)["neg"].rolling(window, min_periods=mp).std(ddof=1) \
          .reset_index(level=0, drop=True)
-    return _mk(v * np.sqrt(244), d["code"], d["date"], f"downvol{window}")
+    return _mk(v * np.sqrt(SCALING_TRADING_DAYS), d["code"], d["date"], f"downvol{window}")
 
 
 # ── 量能类 ────────────────────────────────────────────────────
@@ -195,6 +197,10 @@ def hh_hl_score(long: pd.DataFrame, window: int = 20) -> pd.Series:
        用未复权价会把「除权」误读成「高点降低」，趋势结构直接判错。
     """
     d = _prep(long)
+    # ⚠️ 这里原本有一行 `g = d.groupby("code", sort=False)`（`bd64b99` 遗留）：
+    #   建了索引却从未查询 —— 下面 `hi`/`lo` 都是各自 inline 建 groupby，
+    #   `g` 是死变量，CI 的 F841 检查（拦的是**整仓**）会拦住它。
+    #   该行已删；保留这段说明，以免同样的写法再回来。
     hi = _px(d, "high").groupby(d["code"], sort=False).rolling(window).max() \
         .reset_index(level=0, drop=True)
     lo = _px(d, "low").groupby(d["code"], sort=False).rolling(window).min() \

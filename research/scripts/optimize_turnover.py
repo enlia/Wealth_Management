@@ -38,14 +38,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from factor_lab.analysis.scorecard import SCORING_RULES
-from factor_lab.config import DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR, is_a_share
-from factor_lab.data import all_codes, load_long, load_prices, load_stock_info
+from factor_lab.config import (DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR,
+                               SCALING_TRADING_DAYS, is_a_share)
+from factor_lab.data import all_codes, load_long, load_factor_prices, load_stock_info
 from factor_lab.data.universe import build_universe
 from expand_factor_library import build_pv_factors
 from run_financial_study import (build_financial_factors, neutralize,
                                  pick_sample)
 
-TRADING_DAYS = 252
+TRADING_DAYS = SCALING_TRADING_DAYS  # ① 倍数换算层，唯一出处 config
 
 
 def zscore_cs(s: pd.Series) -> pd.Series:
@@ -232,8 +233,12 @@ def main() -> int:
     info = info[info["code"].isin(codes)]
     long = build_universe(long, cfg, info=info, verbose=False)
     alive = long["code"].unique().tolist()
-    prices = load_prices(alive, start=cfg.start_date, end=cfg.end_date,
-                         field="close")
+    # 🔴 两种价格口径必须分开取（2026-10-06 修）：
+    #    PB/EP 用未复权（bps/eps 是财报披露的原始数字），
+    #    收益/IC/回测用前复权（未复权价除权日有假跳空，
+    #    实测全市场等权口径年化偏差 5~17pp/年）。
+    px_raw, prices = load_factor_prices(alive, start=cfg.start_date,
+                                    end=cfg.end_date)
     print(f"  {len(alive):,} 只 × {prices.shape[0]:,} 日，{time.perf_counter()-t0:.1f}s")
 
     # 构造合成因子
@@ -242,7 +247,7 @@ def main() -> int:
         Path(__file__).resolve().parents[2] / "runtime" / "financial_panel.parquet")
     panel = panel[panel["sym"].isin(alive)]
     shares = info.set_index("code")["shares"] if "shares" in info.columns else None
-    fac = build_financial_factors(panel, prices.index, prices, shares=shares)
+    fac = build_financial_factors(panel, prices.index, px_raw, shares=shares)
     daily = fac.pop("_daily")
     ind_map, cap_map = daily["industry"], daily["mktcap"]
     pv = build_pv_factors(long)

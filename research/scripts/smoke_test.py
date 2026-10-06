@@ -88,7 +88,9 @@ def step1_smoke() -> None:
     print("=" * 70)
     t0 = time.perf_counter()
     codes = list(KNOWN)[:5]
-    wide = load_prices(codes, start="2026-09-01", end="2026-09-30")
+    # 步骤 1 只验「能读出形状」，口径无关；用前复权价（收益研究惯例）
+    wide = load_prices(codes, start="2026-09-01", end="2026-09-30",
+                       field="close_adj")
     dt = time.perf_counter() - t0
     print(f"  读取耗时 {dt*1000:.0f} ms")
     print(f"  形状 {wide.shape}  索引 {wide.index.min().date()} ~ {wide.index.max().date()}")
@@ -103,7 +105,13 @@ def step2_verify_known() -> None:
     print("=" * 70)
     print("步骤 2  抽查实际数值 vs 通达信 MCP 实测值")
     print("=" * 70)
-    wide = load_prices(list(KNOWN))
+    # 🔴 **必须用未复权价**（2026-10-06 修）
+    #   `KNOWN` 是通达信 `.day` 二进制直读的**报价**，与 SQLite 的 `close` 同口径。
+    #   load_prices 默认已改为 close_adj，若不显式指定这里会拿到前复权价：
+    #   · 个股末日 ratio=1.0 恰好相同 → 侥幸对得上
+    #   · 指数(sh000001/sh000300)、板块(sh880402)、B股(sh900948)
+    #     **完全没有 close_adj 数据** → 实测拿到 NaN，4/8 对账失败。
+    wide = load_prices(list(KNOWN), None, None, field="close")
     last_row = wide.ffill().iloc[-1]
     ok = 0
     for code, expect in KNOWN.items():
@@ -125,7 +133,9 @@ def step3_cross_validate() -> None:
     print("步骤 3  交叉验证：SQLite 读出值 vs .day 二进制直读值")
     print("=" * 70)
     print("  意义：SQLite 是二次构建的产物，若与原始文件不一致说明构建有 bug")
-    wide = load_prices(list(KNOWN))
+    # 🔴 同上：`read_tdx_direct` 直读 `.day` 得到的是**未复权报价**，必须同口径。
+    #   实测 close_adj 对指数/板块/B股覆盖率 0%，不指定则本步骤全 NaN。
+    wide = load_prices(list(KNOWN), None, None, field="close")
     last_row = wide.ffill().iloc[-1]
     diffs = []
     for code in KNOWN:
