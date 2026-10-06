@@ -114,48 +114,12 @@ def manual_turnover_note() -> str:
             f"不是瓶颈。")
 
 
-# ── A 股特有的交易约束（量价因子完全没覆盖）──────────────────
-@dataclass
-class TradabilityFilter:
-    """涨跌停与停牌约束。
-
-    ⚠️ 这是 A 股手动交易**最大的隐性风险**，而所有因子研究都忽略了它：
-      · 涨停时买不到（买单挂不上）
-      · 跌停时卖不出（想跑跑不掉）
-      · 停牌期间完全无法操作
-
-    实测：本项目采样区间内主板日均涨停 53 只、跌停 4 只；
-    一只强势股在买入信号出现时可能已经涨停 —— 因子说「买」，
-    实际买不到，等下一个信号就是一周后。
-
-    **对「赚钱效率」的影响**：选出的股票越强势，越买不到。
-    这会系统性削弱动量类因子的实际收益。
-    """
-
-    skip_limit_up: bool = True    # 买入时跳过涨停
-    skip_limit_down: bool = False # 卖出时：跌停只能等，不算可卖
-    max_suspended_days: int = 3   # 停牌超过 N 天视为不可用
-    volume_cap_ratio: float = 0.0  # 单日成交量不超过流通盘的 N 倍（0=不限制）
-
-
-def limit_state(
-    close: pd.Series, high: pd.Series, low: pd.Series,
-    code: str, prev_close: pd.Series | float,
-) -> pd.Series:
-    """判定每只股票每日的涨跌停状态。
-
-    返回 True 表示「处于涨跌停状态」（买不到或卖不出）。
-    """
-    from factor_lab.market_rules import limit_of, limit_price
-
-    lim = limit_of(code)
-    if isinstance(prev_close, pd.Series):
-        up = close >= limit_price(prev_close, lim) - 1e-6
-        dn = close <= limit_price(prev_close, -lim) + 1e-6
-    else:
-        up = close >= limit_price(float(prev_close), lim) - 1e-6
-        dn = close <= limit_price(float(prev_close), -lim) + 1e-6
-    return (up | dn).fillna(False)
+# ── A 股特有的交易约束 ────────────────────────────────────────
+# ⚠️ `TradabilityFilter` / `limit_state` 已拆到 `tradable.py`（2026-10-06）。
+#    原因：本文件加注释后达 502 行，超过「≤500 行」硬性门禁。
+#    **这两个符号无生产调用方，且涨跌停约束实际从未生效过** ——
+#    `limit_state` 的 Series 分支必崩、缺数据口径还与 `limit_masks` 相反。
+#    详见 `tradable.py` 的模块 docstring。
 
 
 # ── 持仓构建 ──────────────────────────────────────────────────
@@ -447,9 +411,23 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     dW = np.abs(np.diff(W, axis=0, prepend=W[:1]))
     turn = dW.sum(axis=1)
 
+    # ⚠️⚠️ **换手必须按 ok 夹取**（review 2026-10-06 复核抓出，BLOCK）：
+    #   `ok=False` 的行（末位没有下一期收益）其 `W` 全为 0，
+    #   而 `np.diff` 会把「有仓 → 0」视为**清仓** ⇒ `turn` = 1.0。
+    #   该行既没有收益发生，却被扣一次全额往返成本 ⇒ **凭空少赚**。
+    #   实测（T=5、fwd 4 行、默认成本）：末行 turn=1.0、cost=0.00151，
+    #   在 4 个交易日的窗口里把年化从 107.46% 压到 80.72%（**低估 26pp**）。
+    #   ⚠️ 生产路径恰好等长（`pct_change().shift(-1)` 保留全行）所以不触发，
+    #      这正是「靠巧合活着」的典型 —— 一旦有第二个调用方传短 fwd 就中招。
+    #   ⇒ 换手与成本都只认有收益发生的行。
+    turn = np.where(ok, turn, 0.0)
     cost_arr = turn * (cost.buy + cost.sell) / 2
     net = gross - cost_arr
-    nav = np.cumprod(1.0 + net)
+    # ⚠️ nav 同样只能在 ok 行上复利：非 ok 行既无收益也无成本，
+    #   留着只会污染「累计净值」这个对外报出的数字。
+    nav_all = np.cumprod(1.0 + net)
+    nav = nav_all[ok] if ok.any() else nav_all
+    dates = np.asarray(dates)[ok] if ok.any() else np.asarray(dates)
 
     if len(nav) < 2 or not np.isfinite(nav[-1]) or nav[-1] <= 0:
         return {"ok": False, "reason": "净值序列异常"}

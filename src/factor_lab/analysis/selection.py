@@ -119,5 +119,14 @@ def select_with_buffer(top_idx: np.ndarray, is_rebal: np.ndarray,
             if c not in keep:
                 keep.append(c)
         prev = np.asarray(keep[:n_hold], dtype=top_idx.dtype)
+        # ⚠️ 候选池不足 n_hold 时必须补 -1 哨兵（实测 2026-10-06）：
+        #   `out[t] = prev` 在 prev 比 n_hold 短时抛
+        #   `ValueError: could not broadcast input array from shape (2,) into shape (3,)`。
+        #   触发场景：某日全市场只有 2 只股票因子值有限（新股/停牌/退市），
+        #   而 n_hold=3 —— 这是**真实会发生**的，不是构造出来的边缘情况。
+        #   ⇒ 用 -1 表示「该槽无持仓」。**不能用 0 补**：列索引 0 是真实股票。
+        if len(prev) < n_hold:
+            prev = np.concatenate(
+                [prev, np.full(n_hold - len(prev), -1, dtype=top_idx.dtype)])
         out[t] = prev
     return out
