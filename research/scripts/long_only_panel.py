@@ -22,6 +22,7 @@ from factor_lab.factors.price_volume import compute_factor  # noqa: E402
 from long_only_data import (  # noqa: E402
     WARMUP_TRADING_DAYS,
     _shift_date,
+    dedupe_long,
     load_long_chunked,
 )
 
@@ -136,21 +137,23 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         if long.empty:
             continue
         # ⚠️⚠️ **预热数据必须先按 (code, date) 去重**（实测踩过）：
-        #   `years` 现在按 pad_start 实际落点算（如 2017~2019），
-        #   相邻年份段的预热区间**会重叠** ——
-        #   2019 年的数据同时出现在「2018 段」的预热和「2019 段」主体里。
+        #   相邻年份切片的预热区间会重叠，同一 (code, date) 出现多行，
         #   不去重则 `unstack('asset')` 直接抛
         #   `ValueError: Index contains duplicate entries`。
         #
         #   ⚠️ 去重必须在**算因子之前**，否则因子会在重复行上算错。
         #   `_prep` 内部按 ["code","date"] 排序但**不去重**，
-        #   所以这里必须显式处理。
+        #   所以这里必须显式处理（long_only_data.dedupe_long）。
+        #
+        #   ⚠️ 去重规则按 DATA_SOURCE S5/S8 分两类：
+        #   整行完全相同的重复 = 拼接产物，允许去掉；
+        #   同 (code, date) 取值不同 = 数据冲突，
+        #   **不做 keep='last' 静默丢弃**，由 dedupe_long 直接报错。
         before = len(long)
-        long = (long.sort_values(["code", "date"], kind="stable")
-                    .drop_duplicates(subset=["code", "date"], keep="last"))
+        long = dedupe_long(long)
         if len(long) != before:
             print(f"    {y}: 去重 {before:,} → {len(long):,} 行"
-                  f"（预热区间与相邻年份重叠）")
+                  f"（预热区间与相邻年份重叠产生的整行重复）")
         # ⚠️ **不能在这里裁剪** —— 这是预热失效的真正根因（实测踩过）：
         #   预热数据（上一年的行）在这里被 `>= lo` 全部删掉，
         #   **然后才调用 compute_factor** —— 因子根本看不到预热数据。

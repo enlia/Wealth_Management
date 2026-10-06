@@ -45,6 +45,37 @@ def _shift_date(d: str, n_days: int) -> str:
     return (ts - pd.tseries.offsets.BDay(abs(n_days))).strftime("%Y%m%d")
 
 
+def dedupe_long(long: pd.DataFrame) -> pd.DataFrame:
+    """按 (code, date) 消掉重复行情行；同键不同值**直接报错**。
+
+    两类「重复」必须分开处理（DATA_SOURCE S5 / S8）：
+      · **整行完全相同** —— 分块读取的重叠拼接产物，是重复行，允许去掉；
+      · **同 (code, date) 但取值不同** —— 数据冲突（多版本 / 复权口径差异），
+        ``keep='last'`` 会静默丢掉冲突值、直接污染收益计算，必须抛错。
+
+    返回按 (code, date) 稳定排序的去重结果；
+    检测到取值冲突时抛 ValueError，信息含冲突键数量与示例。
+    """
+    rows_in = len(long)
+    out = long.drop_duplicates()          # 整行重复：拼接产物，允许去掉
+    conflict = out.duplicated(subset=["code", "date"], keep=False)
+    if conflict.any():
+        keys = (out.loc[conflict, ["code", "date"]]
+                   .drop_duplicates()
+                   .sort_values(["code", "date"]))
+        examples = ", ".join(
+            f"({r.code}, {r.date})" for r in keys.head(5).itertuples())
+        raise ValueError(
+            f"同一 (code, date) 存在**取值不同**的多行（{len(keys)} 个键），"
+            f"不允许静默 keep='last' 去重（DATA_SOURCE S5/S8）。\n"
+            f"  冲突键示例：{examples}\n"
+            f"  整行完全相同的重复行 {rows_in - len(out):,} 行已允许去掉；"
+            f"取值冲突说明数据源存在多版本或复权口径差异，"
+            f"必须先定下明确的保留规则（含 ann_date / update_flag 等版本维度）"
+            f"再处理。")
+    return out.sort_values(["code", "date"], kind="stable")
+
+
 def load_long_chunked(codes: list[str], start: str, end: str,
                       years: tuple[int, ...] | None = None,
                       verbose: bool = True) -> pd.DataFrame:
