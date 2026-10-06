@@ -228,11 +228,19 @@ def build_long_only(
     n_hold = min(spec.n_hold, n_pick)
 
     # 2) 权重：因子分位 + 波动率倒数（风险平价思路的简化版）
+    # ⚠️⚠️ 波动率**绝不能用 fwd 算**（review 2026-10-06 抓出，前视1 天）：
+    #   `fwd[t]` 是「t 收盘买、t+1 收盘卖」的收益，在 t 收盘时**还没发生**；
+    #   而 `rolling()` 默认**含当前点**（实测 fwd=[1,2,3] 时
+    #   第 2 行得std([1,2,3])）⇒ 逆波动率权重用到了未来一天的收益。
+    #   这与本函数开头「因子在 d 日收盘才可得」的口径自相矛盾。
+    #   ⇒ 改用 `past = fwd.shift(1)`：t 日的权重只由 t-1 及之前的收益决定。
+    #   影响幅度不大（波动率估计差一天），但方向明确违反无前视原则。
+    past = fwd.shift(1)
     #⚠️ 性能：必须**预计算滚动波动率**。
     #   初版写成 `fwd.loc[:d, held].tail(60)`逐日全表切片，
     #   实测 5,606 只 × 2,611 日跑到 20 分钟没跑完（O(n²)）。
     #   pandas 的 rolling 是 O(n)，预计算后逐日只做 O(n_hold) 的索引。
-    rolling_vol = (fwd.rolling(spec.vol_lookback, min_periods=max(
+    rolling_vol = (past.rolling(spec.vol_lookback, min_periods=max(
         20, spec.vol_lookback // 3)).std() * np.sqrt(252))
 
     #⚠️ 性能：整段**向量化**。
@@ -284,7 +292,15 @@ def build_long_only(
     w_eq = np.full((T, n_hold), 1.0 / n_hold)
     w_mat = np.where(degenerate[:, None], w_eq, w_mat)
     w_mat = np.clip(w_mat, spec.min_weight, spec.max_weight)
-    w_mat = w_mat / w_mat.sum(axis=1, keepdims=True)
+    # ⚠️ **clip 之后必须重新屏蔽哨兵**（review 2026-10-06 抓出，BLOCK）：
+    #   上面刚把哨兵槽位置0，但 `np.clip(0, min_weight=0.02, ...)`
+    #   会把它抬成 0.02 —— 权重凭空出现。
+    #   实测：3槽持仓含1 个哨兵 → 哨兵权重 0 → clip 后 2% → 再归一化后 **6.25%**，
+    #   而 `held_safe` 已把 -1 映射到列 0（**一只真实存在的股票**），
+    #   下面的散射赋值 `W[rows, held_safe] = w_mat` 就把这 6.25% 打到了它身上。
+    #   ⇒注释里「哨兵槽位权重为 0，不会凭空建仓」这句在 clip 之后是**错的**。
+    w_mat = np.where(held_mat < 0, 0.0, w_mat)
+    w_mat = w_mat / np.maximum(w_mat.sum(axis=1, keepdims=True), 1e-12)
 
     # 非调仓日**沿用上一期权重**。
     # ⚠️ held_mat **不要**再 carry_forward —— select_with_buffer 内部已经
@@ -343,12 +359,23 @@ def _year_span(dates) -> float:
 
     ⚠️ **整个项目只有一个年化定义**，策略与基准共用。
        初版策略用自然日、基准用 `len/252`，同一份收益算出两个年化，
-       「超额」直接偏0.5pp/年 —— 而超额是所有结论的判据。
+       「超额」直接偏 0.5pp/年 —— 而超额是所有结论的判据。
 
-    ⚠️ 退化保护：区间不足 1 天时 `days=0` 会除零。
-       极短区间（< 20 交易日）的年化本身失真（review 实测：
-       20 个交易日 +8% 年化被报成 +163%），故设最小天数下限并由调用方
-       对短窗口另作判断，不让单个异常值污染汇总。
+    ⚠️ 退化保护：区间不足 1 天时 `days=0` 会除零，故用 `max(..., 1e-9)` 兜底。
+
+    ⚠️⚠️ **短区间年化会严重放大，这是口径的固有性质，不是 bug**：
+       几何年化 `nav**(1/years)-1` 在 years 很小时极不稳定。
+       实测同一份 +8% 累计收益：
+         20 个交易日(0.074 年) → 年化 **+183%**
+         60 个交易日(0.227 年) → 年化 **+40%**
+         1年(0.931 年)        → 年化 **+8.6%**
+       ⇒ **本函数不做下限保护，也不该假装做了**。
+         下限保护属于「调用方该不该用这个窗口」的判断，
+         混进年化函数里会让调用方以为短窗口是安全的。
+         `walk_forward.make_windows` 已用 `len(te) >= 60` 过滤短窗口，
+         那里才是该加约束的地方。
+       （此前此处 docstring 声称本函数已加天数下限，实测代码里并没有 ——
+         注释与实现不符比没有注释更危险，故删除该声明。）
     """
     if len(dates) < 2:
         return 1e-9
@@ -356,6 +383,9 @@ def _year_span(dates) -> float:
     if hasattr(d0, "year"):                      # Timestamp 索引
         days = (d1 - d0).days
     else:                                        # 位置索引，兜底按交易日折算
+        # 243 = A股实际年均交易日（实测 2026-01~09 为 243日）。
+        # ⚠️ 这条分支是**兜底**，与主口径（自然日）不同；
+        #   混用会让同一份收益算出两个年数，正是本函数要消灭的问题。
         return max(len(dates) / 243.0, 1e-9)
     return max(days / 365.25, 1e-9)
 
@@ -370,37 +400,50 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     """
     r_mat = fwd.to_numpy(dtype=float)          # (T, N) 前视修正后的收益
     r_mat = np.nan_to_num(r_mat, nan=0.0)
-    T = r_mat.shape[0]
+    # ⚠️ **T 必须取自 dates（不是 r_mat）**（review 2026-10-06）：
+    #   `gross` / `w_mat` / `held_mat` 全都是**按 dates 对齐**的，
+    #   原先写 `T = r_mat.shape[0]` 是假设两者等长。
+    #   当 fwd 末位没有下一期收益（行数 = len(dates)-1）时，
+    #   T 少 1 → `gross[ok]` 与 `w_mat[ok]` 形状不匹配，报
+    #   `IndexError: boolean index did not match ... size 4 but size 5`。
+    #   生产路径恰好等长（shift 保留全行、末行填 NaN），所以这个 bug 一直藏着，
+    #   直到测试用真实的 (T-1) 行 fwd 才暴露 —— 典型的「靠巧合活着」。
+    T = len(dates)
+    # fwd 行数可能少于 dates（末位无下一期收益）⇒ 夹住上界
+    n_r = min(len(r_mat), T)
     date_pos = {d: i for i, d in enumerate(dates)}
     pos = np.array([date_pos.get(d, -1) for d in dates])
-    ok = pos >= 0
+    ok = (pos >= 0) & (pos < n_r)
+
+    # ⚠️⚠️ **哨兵绝不能映射到列 0**（实测发现，比 review 报的 BLOCK-1 更隐蔽）：
+    #   `held_safe = np.where(held_mat < 0, 0, held_mat)` 把哨兵指向**第 0 列**，
+    #   而第 0 列**本身就是一只真实持仓**（`held_mat` 里可能已经有 0）。
+    #   散射赋值 `W[rows, idx] = vals` 对重复下标是**后写覆盖**——
+    #   哨兵槽的权重 0 会把真实持仓 c0 的权重**直接抹成 0**。
+    #   实测：c0 权重 0.6 被抹成 0，组合日收益从 +0.2% 掉到 −0.4%。
+    #   ⇒ 给哨兵一个**独立的垃圾列**：收益矩阵与 W 都多一列（全 0），
+    #     真实列仍是0..N-1。该列收益恒 0、权重恒 0，双重零贡献。
+    sentinel_col = r_mat.shape[1]             # 真实列是 [0, r_mat.shape[1])
+    r_ext = np.column_stack([r_mat, np.zeros(len(r_mat))])
+    held_idx = np.where(held_mat < 0, sentinel_col, held_mat)
 
     # 组合每日收益 = Σ w[i,t] × r[t, held[i,t]]
-    # ⚠️ **必须屏蔽 held_mat 里的 -1 哨兵**（无持仓槽位）：
-    #   numpy 用**负索引语义**，-1 会取到**最后一列** = 某只真实股票。
-    #   它的权重恰好是 0（权重构造时把哨兵置 NaN→0），
-    #   所以乘积为 0 不会污染收益 —— 但下面 W 的散射赋值
-    #   `W[rows, held_mat] = w_mat` 会往「最后一列」写权重，
-    #   凭空建仓。必须一并屏蔽。
-    held_safe = np.where(held_mat < 0, 0, held_mat)
-    # ⚠️ 索引顺序：`held_mat[ok]` 是 (T_ok, n_hold)，`pos[ok]` 是 (T_ok,)，
-    #    numpy 广播时**行索引必须先取 held 再取 pos**，写反会形状不匹配。
     gross = np.zeros(T)
     if ok.any():
-        rr = r_mat[pos[ok][:, None], held_safe[ok]]   # (T_ok, n_hold)
+        # ⚠️ 索引顺序：`held_idx[ok]` 是 (T_ok, n_hold)，`pos[ok]` 是 (T_ok,)，
+        #    numpy 广播时**行索引必须先取 held 再取 pos**，写反会形状不匹配。
+        rr = r_ext[pos[ok][:, None], held_idx[ok]]   # (T_ok, n_hold)
         gross[ok] = np.nansum(w_mat[ok] * rr, axis=1)
 
     # 换手 = |w_t - w_{t-1}| 在**全股票空间**上的 L1 差
     # ⚠️ 必须在全 N 只上算，只在持仓股票上算会漏掉「卖出的股票」，
     #    实测那种算法换手率被低估约一半。
-    W = np.zeros((T, r_mat.shape[1]), dtype=float)
+    W = np.zeros((T, sentinel_col + 1), dtype=float)   # 末列 = 哨兵垃圾列
     rows_ok = np.where(ok)[0]
     if len(rows_ok):
         # ⚠️ 需要把行索引扩展成二维 (T_ok, 1)，
         #    否则 (T_ok,) 与 (T_ok, n_hold) 广播失败。
-        # ⚠️ 用 held_safe（-1→0）：哨兵槽位权重为 0，
-        #    写进第 0 列也是 0，不会凭空建仓。
-        W[rows_ok[:, None], held_safe[rows_ok]] = w_mat[rows_ok]
+        W[rows_ok[:, None], held_idx[rows_ok]] = w_mat[rows_ok]
     dW = np.abs(np.diff(W, axis=0, prepend=W[:1]))
     turn = dW.sum(axis=1)
 

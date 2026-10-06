@@ -55,7 +55,18 @@ def run_windows(panels: dict, price: pd.DataFrame, factor: str,
                 spec: WindowSpec, cost: CostModel,
                 n_hold: int, n_pick_mult: int) -> list[dict]:
     """逐窗口跑回测，收集每个窗口的超额。"""
-    bench_ret = price.pct_change(fill_method=None).mean(axis=1)
+    # ⚠️ **基准必须用窗口内切片重算，不能全样本算完再 .loc[te]**（review 2026-10-06，BLOCK）：
+    #   `price.pct_change()` 在全样本上算，`.loc[te]` 出来的**首行是 te[0] 当天的收益**，
+    #   而该收益的分母是 te[0] 的**前一日收盘价 —— 落在训练期里**。
+    #   策略侧 `build_long_only(p.loc[te], ..., price.loc[te])` 里
+    #   `price_panel.pct_change()` 的首行恒为 NaN，**没有这一天**。
+    #   ⇒ 基准比策略多算 1 天，且多的这 1 天来自训练期。
+    #   实测（261 日窗口）：基准 n=200 / 策略 n=199，
+    #   基准年化 -11.01% vs 策略 -9.61% → 超额 +1.40%；
+    #   对齐后基准 -9.57% ⇒ **仅因边界错位，基准年化偏 -1.44%**。
+    #   等权基准在 A 股多数年份上涨 ⇒ 基准偏高 ⇒ **所有超额被系统性低估**。
+    #   而「超额」是本脚本全部结论的唯一判据。
+    bench_full = price.pct_change(fill_method=None).mean(axis=1)
     p = panels[factor]
     dates = sorted(set(p.index) & set(price.index))
     p = p.loc[dates]
@@ -76,7 +87,9 @@ def run_windows(panels: dict, price: pd.DataFrame, factor: str,
                         "基准": np.nan, "超额": np.nan, "换手": np.nan,
                         "备注": r.get("reason", "失败")})
             continue
-        b = _bench_stats(bench_ret.loc[te])
+        # 与策略同源：窗口内重算，首行 NaN 自然丢弃 ⇒ 两侧区间完全对齐
+        bench_ret = price.loc[te].pct_change(fill_method=None).mean(axis=1)
+        b = _bench_stats(bench_ret)
         out.append({
             "窗口": i, "测试起": str(te[0].date()), "测试止": str(te[-1].date()),
             "策略": r["年化收益"], "基准": b, "超额": r["年化收益"] - b,
