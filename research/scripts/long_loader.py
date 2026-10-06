@@ -1,4 +1,4 @@
-"""从 SQLite 分块加载后复权行情。
+"""从 SQLite 分块加载前复权行情。
 
 ## 为什么单独成模块
 
@@ -27,7 +27,7 @@ from factor_lab.config import DB_PATH  # noqa: E402
 def load_long_chunked(codes: list[str], start: str, end: str,
                       years: tuple[int, ...] | None = None,
                       verbose: bool = True) -> pd.DataFrame:
-    """分年加载后复权价，避免一次性读入撑爆内存。
+    """分年加载前复权价，避免一次性读入撑爆内存。
 
     ⚠️ **为什么必须分块**：
     全市场 5,606 只 × 2,611 日 = **1,080 万行 × 9 列**，
