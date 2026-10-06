@@ -110,14 +110,36 @@ def load_long(
     start: str | None = None,
     end: str | None = None,
     db_path: Path | str = DB_PATH,
+    adjusted: bool = False,
 ) -> pd.DataFrame:
     """读出长表：code / date / open / high / low / close / amount / vol
 
     因子计算用长表更自然（groupby code），转宽表交给调用方。
+
+    参数
+    ----
+    adjusted : False（默认）只返回**未复权** OHLC。
+        True 时**额外**返回三列后复权价，且**不改动**原始 OHLC：
+        ``close_adj`` / ``high_adj`` / ``low_adj``。
+
+    ⚠️ **收益研究必须 adjusted=True**（AGENTS.md 第二节质量红线）。
+       ``close`` 是未复权价，除权日出现假跳空：
+       实测主板 0.291% 的日收益超过 ±10% 限制，年化偏差 2.33pp。
+
+       为什么**保留**未复权 OHLC 而不是就地替换：
+       涨跌停判定必须用**报价**（交易所约束的是报价，与复权无关），
+       仙股过滤（2~3000 元）也只对报价成立。直接替换会让这两个判断失效。
+
+       ``high_adj`` / ``low_adj`` 由``high * close_adj/close`` 推导：
+       复权是乘性调整，对同一天的高/低价位同样适用。
+       ⚠️ ``close_adj`` 为 NULL 的行（实测占 A 股 1.616%）比值为 NaN，
+       这三列在该行为空——**按缺失处理，不要填 0**。
     """
     s, e = _norm_date(start), _norm_date(end)
+    adj_cols = ", close_adj" if adjusted else ""
     sql = (
-        "SELECT code, date, open, high, low, close, amount, vol "
+        "SELECT code, date, open, high, low, close, amount, vol"
+        f"{adj_cols} "
         "FROM bar_daily WHERE 1=1"
     )
     params: list = []
@@ -138,10 +160,18 @@ def load_long(
     with _connect(db_path) as con:
         rows = con.execute(sql, params).fetchall()
     cols = ["code", "date", "open", "high", "low", "close", "amount", "vol"]
+    if adjusted:
+        cols.append("close_adj")
     df = pd.DataFrame(rows, columns=cols)
     if df.empty:
         return df
     df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+    if adjusted:
+        # 复权比例：同一天三个价格位共用一个乘数。
+        # 用 where 屏蔽 close<=0（脏数据）避免除零产生 inf。
+        ratio = (df["close_adj"] / df["close"]).where(df["close"] > 0)
+        df["high_adj"] = df["high"] * ratio
+        df["low_adj"] = df["low"] * ratio
     return df.reset_index(drop=True)
 
 
