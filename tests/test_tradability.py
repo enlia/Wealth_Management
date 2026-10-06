@@ -279,5 +279,133 @@ class TestCoverageReport:
         assert "未覆盖" in bj_lines[0] or "只" in bj_lines[0]
 
 
+class TestNoPxDoesNotBlockUnlisted:
+    """🔴 **BLOCK 回归**：`no_px` 曾让 `unlisted_state` 修复完全失效。
+
+    ## 缺陷本体
+
+    初版：
+        no_px = up.isna() | dn.isna()
+        limit_up = (close >= up - tol) | no_px      # ← 无条件封板
+
+    Tushare `stk_limit` **在未上市/已退市的日子里本来就没有行**
+    ⇒ 未上市 ⇒ `up` 为 NaN ⇒ `no_px=True` ⇒ 未上市股票被判「封涨停」。
+
+    ⇒ `unlisted_state="tradable"` 只在「有涨跌停价但无 close」时生效，
+      而「未上市」这个**主体场景**在更早的 `no_px` 分支就被拦下了。
+
+    ## 实测影响（2016-2026 全市场 A 股 5,921 只 × 2,611 日）
+
+    | 口径 | 买不进 | 卖不掉 |
+    |---|---|---|
+    | 初版 | **27.817%** | **27.179%** |
+    | 修正版 | 1.164% | 0.526% |
+    | 真实封板强度 | 1.048% | 0.410% |
+
+    `no_px` 的 4,138,520 格里 **99.6%** 是「close 也缺失」，
+    只有 0.116% 是真正的上市期间数据空洞。
+    """
+
+    @staticmethod
+    def _panels():
+        """3 日 × 2 只。sz000001 第 2 日起才上市（第 0、1 日未上市）。"""
+        idx = pd.to_datetime(["2023-01-03", "2023-01-04", "2023-01-05"])
+        cols = ["sh600001", "sz000001"]
+        close = pd.DataFrame(
+            [[10.0, np.nan],       # 第 0 日：sz 未上市
+             [10.2, np.nan],       # 第 1 日：sz 未上市
+             [10.1, 20.0]],         # 第 2 日：两只都在交易
+            index=idx, columns=cols)
+        # 关键：stk_limit 对未上市日**没有行**⇒ up/dn 也是 NaN
+        up = pd.DataFrame(
+            [[11.0, np.nan], [11.2, np.nan], [11.1, 22.0]],
+            index=idx, columns=cols)
+        dn = pd.DataFrame(
+            [[9.0, np.nan], [9.2, np.nan], [9.1, 18.0]],
+            index=idx, columns=cols)
+        return close, up, dn
+
+    def test_未上市不得被判买不进(self):
+        """🔴 核心判据：未上市格子的 `limit_up` 必须为 False。"""
+        close, up, dn = self._panels()
+        limit_up, _ = limit_masks(close, up, dn, unlisted_state="tradable")
+
+        assert not bool(limit_up.loc[pd.Timestamp("2023-01-03"), "sz000001"]), \
+            "未上市被判成买不进 —— no_px 又把 unlisted_state 绕过去了"
+        assert not bool(limit_up.loc[pd.Timestamp("2023-01-04"), "sz000001"]), \
+            "未上市被判成买不进"
+
+    def test_未上市不得被判卖不掉(self):
+        """🔴 退市股永久锁仓的根源在**卖出端**，必须单独守。"""
+        close, up, dn = self._panels()
+        _, limit_dn = limit_masks(close, up, dn, unlisted_state="tradable")
+
+        assert not bool(limit_dn.loc[pd.Timestamp("2023-01-03"), "sz000001"]), \
+            "未上市被判成卖不掉 ⇒ 退市股会僵尸锁仓"
+
+    def test_买不进比例必须接近真实封板率(self):
+        """整体口径自检：不能把「未上市」算进约束强度。
+
+        这是**唯一能抓住该bug 的整体判据** ——
+        单点断言容易和别的口径混淆，比率不会。
+        """
+        close, up, dn = self._panels()
+        limit_up, _ = limit_masks(close, up, dn, unlisted_state="tradable")
+        # 3 日 × 2 只 = 6 格，其中真封板0 格 ⇒ 买不进必须是 0
+        assert float(limit_up.to_numpy().mean()) == 0.0, (
+            f"买不进比例应为 0，实测 "
+            f"{float(limit_up.to_numpy().mean()):.2%} —— 未上市被误封")
+
+    def test_有close但缺价仍然保守封板(self):
+        """⚠️ **另一侧不能一起放掉**：真数据空洞仍须判不可交易。
+
+        上市期间有 close 却没涨跌停价 ⇒ 无法判断是否封板 ⇒ 保守封 True。
+        这是安全的一侧（不会高估可交易性），不能为了修未上市而放掉。
+
+        ⚠️ 面板整体覆盖率必须 ≥50%（`limit_masks` 的口径自检会抛错），
+        所以用 4×4 面板、只让一格缺价来构造。
+        """
+        idx = pd.to_datetime(["2023-01-03", "2023-01-04",
+                              "2023-01-05", "2023-01-06"])
+        cols = [f"sh60000{i}" for i in range(4)]
+        close = pd.DataFrame(10.0, index=idx, columns=cols)
+        up = pd.DataFrame(11.0, index=idx, columns=cols)
+        dn = pd.DataFrame(9.0, index=idx, columns=cols)
+        # 只让 sh600000 第 0 日缺涨跌停价（真实数据空洞）
+        up.loc[idx[0], "sh600000"] = np.nan
+        dn.loc[idx[0], "sh600000"] = np.nan
+
+        limit_up, limit_dn = limit_masks(close, up, dn)
+
+        assert bool(limit_up.loc[idx[0], "sh600000"]), \
+            "有 close 但缺价应保守判买不进"
+        assert bool(limit_dn.loc[idx[0], "sh600000"]), \
+            "有 close 但缺价应保守判卖不掉"
+        # 其余格子不应受影响
+        assert not bool(limit_up.loc[idx[1], "sh600000"]), \
+            "只有缺价那一格该被封"
+
+    def test_真封涨停仍然被识别(self):
+        """修复不能把真封板也一起放掉。"""
+        idx = pd.to_datetime(["2023-01-03"])
+        cols = ["sh600001"]
+        close = pd.DataFrame([[11.0]], index=idx, columns=cols)  # 收在涨停
+        up = pd.DataFrame([[11.0]], index=idx, columns=cols)
+        dn = pd.DataFrame([[9.0]], index=idx, columns=cols)
+
+        limit_up, limit_dn = limit_masks(close, up, dn)
+
+        assert bool(limit_up.iloc[0, 0]), "收在涨停价必须判买不进"
+        assert not bool(limit_dn.iloc[0, 0]), "涨停不应同时判跌停"
+
+    def test_blocked模式仍然封未上市(self):
+        """`unlisted_state="blocked"` 的显式契约不能被这次修复破坏。"""
+        close, up, dn = self._panels()
+        limit_up, _ = limit_masks(close, up, dn, unlisted_state="blocked")
+
+        assert bool(limit_up.loc[pd.Timestamp("2023-01-03"), "sz000001"]), \
+            "blocked 模式必须封未上市（调用方显式要求）"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
