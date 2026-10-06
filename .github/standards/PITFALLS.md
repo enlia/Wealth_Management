@@ -462,4 +462,45 @@ mktcap / shares = 股价
 单位常量与转换函数集中在 `factor_lab.config`：
 `MARKET_CAP_UNIT = "万元"` / `to_wan()` / `YI_TO_WAN = 1e4`
 
+### P19 的第二个实例：财务表单位差 1e8 倍（2026-10-06）
+
+同一个坑换了战场又踩一次。这次是**Tushare 财务表 vs 本机 stock_info**：
+
+| 来源 | 字段 | 单位 |
+|---|---|---|
+| `ts_income` / `ts_balance_sheet` / `ts_cashflow` | `total_revenue`、`n_income`、`total_assets` | **元** |
+| 本机 `stock_info`（通达信口径） | `revenue`、`net_profit`、`net_assets` | **亿元** |
+
+**硬验证方法**（与 P19 的「mktcap / shares = 股价」同源）：
+
+```
+stock_info.net_assets  2,512.536 亿元
+÷ shares                12.500815 亿股
+= 200.98978 元/股
+ts_fina_indicator.bps              = 200.9898 元/股   ✓ 一致
+```
+
+→ 确认差 1e8 倍。后果：
+```
+ts_income.total_revenue(9.23e10) ÷ stock_info.revenue(907.03)
+= 101,736,220← 荒谬但不报错
+```
+
+**为什么 `check_units.py` 没抓到**：它只检查了 `mktcap`（市值体系），
+**从未触及财务表**。所以那次输出「✓ 量纲校验通过」是**假绿**。
+
+**修法**：
+- `config.FINANCIAL_UNIT_LOCAL = "亿元"` / `YUAN_TO_YI = 1e-8`
+- 在并库入口 `merge_tushare_tables.normalize()` 统一换算
+- 每张 `ts_` 表建 `_meta` 记录单位口径
+- 白名单由 `build_money_whitelist.py` **从真实数据推导**，绝不手写
+  （手写实测有 30 个列名是凭记忆写的、实际不存在）
+
+⚠️ 换算判定**不能用列名关键词**——详见 `DATA_SOURCE.md` S10：
+`assets_turn`（周转率）含 assets 会被误换算，`bps`（元/股）必须不换。
+
+**教训升级：P19 已经从「一个字段的量纲」升级为「一整类数据的量纲」。
+每次新增数据源都要问一遍：这批数据的金额单位是什么？和已有的能直接算吗？**
+
+
 ---
