@@ -37,8 +37,21 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research" / "scripts"))
 
+# ⚠️ **主键的单一来源**（2026-10-06 修正）
+# 下载器与门禁各写一份主键必然漂移 —— 实测 dividend 的键两边都缺 div_proc，
+# 于是「186,890 行重复」全是误报（分红本就是多阶段流程）。
+# 现统一从下载器读，门禁只保留「本表特有」的键。
+from fetch_all_tushare import BUSINESS_KEYS  # noqa: E402
+
 OUT = Path(__file__).resolve().parents[2] / "runtime" / "tushare"
 MANIFEST = OUT / "_download_manifest.json"
+
+# 主键重复率的非阻塞上限。
+# ⚠️ **必须按比例而非绝对值**（2026-10-06 实测）：
+#   dividend 修主键前 108,548 行（73%）= 主键漏字段，必阻塞；
+#   修后 836 行（0.3%）= Tushare 上报噪声，不必阻塞。
+#   两者用同一个绝对阈值会「要么全放过、要么全阻塞」。
+DUP_RATIO_TOLERANCE = 0.01
 
 # 各类表的主键与关键字段。
 # ⚠️ 键必须包含「区分实体的字段」——index_weight 只用 trade_date
@@ -79,7 +92,20 @@ SPECS: dict[str, dict] = {
     "top10_holders":    {"keys": ["ts_code", "end_date", "holder_name",
                                   "ann_date"], "freq": "Q"},
     "stk_holdernumber": {"keys": ["ts_code", "end_date"], "freq": "Q"},
-    "dividend":         {"keys": ["ts_code", "end_date"], "freq": "Q"},
+    # ⚠️ dividend 主键必须含 **div_proc**（2026-10-06 实测）：
+    #   分红是多阶段流程（预案/股东大会通过/实施…实测 9 种），
+    #   同一报告期每阶段一条记录。原键 [ts_code, end_date]
+    #   把255,573 行里的 186,890 行（73%）误判成重复。
+    #
+    #   ⚠️ 主键定义**只保留一份**在 fetch_all_tushare.BUSINESS_KEYS，
+    #   门禁从那里读，避免两处不一致（实测踩过：
+    #   下载器认为唯一、门禁认为重复，或反之）。
+    #
+    #   dividend 已修：108,548 → 836 行重复（降 99.2%）。
+    #   剩余 836 行（占 0.3%）是 Tushare 上报的**数据源噪声**：
+    #   同一 (ts_code, end_date, div_proc, ann_date) 下 cash_div_tax
+    #   略有差异（实测 000002.SZ 20181231 预案：1.045102 vs 1.07）。
+    #   比例极低，判为非阻塞。
     "share_float":      {"keys": ["ts_code", "ann_date", "float_date"], "freq": "Q"},
     "pledge_stat":      {"keys": ["ts_code", "end_date"], "freq": "Q"},
     "index_weight":     {"keys": ["index_code", "con_code", "trade_date"], "freq": "M"},
@@ -97,7 +123,11 @@ DATE_COL = {
     "balancesheet": "end_date", "cashflow": "end_date",
     "top10_holders": "end_date", "stk_holdernumber": "end_date",
     "dividend": "end_date", "index_weight": "trade_date",
-    "namechange": "start_date", "share_float": "float_date",
+    # ⚠️ **不能用 float_date 判时间覆盖**（2026-10-06 实测）：
+    #   它是**计划解禁日期**，实测最远到 20330711（未来 7 年），
+    #   用它判覆盖会得出「数据来自未来」的错误结论。
+    #   改用 ann_date（实际披露日）。
+    "namechange": "start_date", "share_float": "ann_date",
     "stock_basic": "list_date", "repurchase": "ann_date",
     "new_share": "ann_date", "disclosure_date": "ann_date",
     "forecast": "ann_date", "express": "ann_date",
@@ -141,6 +171,14 @@ def check_one(name: str, verbose: bool = True) -> dict:
 
     spec = SPECS.get(name, {})
     keys = [k for k in spec.get("keys", []) if k in df.columns]
+    # ⚠️ **主键以下载器为准**（2026-10-06 修正）：
+    #   SPECS 里只放「本表特有的键」（如 top10_holders 的 holder_name），
+    #   通用主键从 fetch_all_tushare.BUSINESS_KEYS 读。
+    #   两处各写一份必然漂移 —— 实测 dividend 的键在下载器里缺 div_proc、
+    #   在门禁里也缺，导致「186,890 行重复」全是误报。
+    if name in BUSINESS_KEYS:
+        canonical = [k for k in BUSINESS_KEYS[name] if k in df.columns]
+        keys = canonical or keys
     if keys:
         dup = int(df.duplicated(subset=keys).sum())
         r["dup"] = dup
@@ -153,11 +191,25 @@ def check_one(name: str, verbose: bool = True) -> dict:
         #    所以有 _clean 版本时，原表的重复**不算问题**。
         has_clean = (OUT / f"{name}_clean.parquet").exists()
         if dup > 0:
+            ratio = dup / max(len(df), 1)
             if has_clean:
                 r["issues"].append(
                     f"主键重复 {dup:,} 行，但已有 _clean 版本（多版本报表，非错误）")
+            elif ratio <= DUP_RATIO_TOLERANCE:
+                # ⚠️ **按比例判定，不按绝对值**（2026-10-06 实测）：
+                #   实测 dividend 修主键后剩 836 行重复（占 0.3%）——
+                #   那是 Tushare 上报的**数据源噪声**（cash_div_tax 略有差异：
+                #   000002.SZ 20181231 预案 1.045102 vs 1.07）。
+                #   与修主键前的 108,548 行（73%，主键漏了 div_proc）
+                #   性质完全不同 —— 后者必须阻塞，前者不该阻塞。
+                #
+                #   用绝对值会「要么全放过、要么全阻塞」，
+                #   0.3% 与73% 混为一谈。
+                r["issues"].append(
+                    f"主键重复 {dup:,} 行（占 {ratio:.2%}，数据源噪声，非阻塞）")
             else:
-                r["issues"].append(f"主键重复 {dup:,} 行（键={keys}）")
+                r["issues"].append(
+                    f"主键重复 {dup:,} 行（占 {ratio:.2%}，键={keys}）")
                 r["blocking"] = True
 
     dc = DATE_COL.get(name)

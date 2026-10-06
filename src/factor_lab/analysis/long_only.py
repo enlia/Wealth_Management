@@ -31,120 +31,37 @@ vol60  多空年化毛 −0.08  多空年化净 −0.28
 """
 from __future__ import annotations
 
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-from factor_lab.analysis.selection import rank_topk, select_with_buffer
-from factor_lab.config import SCALING_TRADING_DAYS, YEAR_TRADING_DAYS
+from factor_lab.analysis.costs import CostModel, breakeven_turnover
+from factor_lab.analysis.engine import (
+    _carry_forward,
+    _year_span,
+    simulate_matrix,
+)
+from factor_lab.analysis.selection import (
+    align_masks,
+    rank_topk,
+    select_with_buffer,
+)
+from factor_lab.analysis.spec import (
+    PortfolioSpec,
+    _normalize_bounded,
+)
+from factor_lab.config import SCALING_TRADING_DAYS
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-
-
-# ── 交易成本（A 股实际水平）────────────────────────────────────
-@dataclass(frozen=True)
-class CostModel:
-    """单边交易成本。
-
-    ⚠️ **双边**换算：买入 0.025%+ 过户费 0.001%，卖出 0.025% + 印花税 0.05%
-       （印花税 2023-08-28 起减半为 0.05%，此前 0.1%）。
-    手动交易的额外成本（研报/软件/时间）不计入，但**换手率要按实际调仓算**。
-    """
-
-    commission: float = 0.00025     # 佣金 万2.5
-    stamp_duty: float = 0.0005      # 印花税 万5（卖出单边）
-    transfer_fee: float = 0.00001   # 过户费 十万分之一（双向）
-    slippage: float = 0.001         # 冲击成本 0.1%（保守估计）
-
-    @property
-    def buy(self) -> float:
-        return self.commission + self.transfer_fee + self.slippage
-
-    @property
-    def sell(self) -> float:
-        return self.commission + self.transfer_fee + self.slippage + self.stamp_duty
-
-    @property
-    def round_trip(self) -> float:
-        return self.buy + self.sell
-
-    def describe(self) -> str:
-        return (f"买入 {self.buy*1e4:.2f}‱/ 卖出 {self.sell*1e4:.2f}‱ "
-                f"（单边成本 {self.buy*1e4:.2f}‱）")
-
-
-# 盈亏平衡换手率：换手率 × 单边成本必须 < 预期年化超额
-def breakeven_turnover(target_annual_return: float, cost: CostModel) -> float:
-    """给定目标年化收益，能承受的最高**年换手率**（倍数）。
-
-    模型：``年化超额 ≥ 年换手率 × 单边成本``
-
-    ⚠️ **这个数字通常大得没有参考价值**（如目标 20% 时是 158 倍年换手）。
-    原因：单边成本只有 0.126%，理论上极高频也能覆盖成本。
-    但**手动交易受的是换手率本身，不是成本**：
-
-    | 调仓频率 | 年换手 | 现实可行性 |
-    |---|---|---|
-    | 月频 | 3~4 倍 | ✓ 手动可行 |
-    | 季频 | 1~1.5 倍 | ✓ 手动舒适 |
-    | 周频 | 12 倍+ | ✗ 盯盘成本高，且滑点会远超模型值 |
-    | 日频 | 250 倍+ | ✗ 不可能 |
-
-    **所以真正的约束是「手动能执行的换手上限」，约年化 4~6 倍**。
-    对应目标年化超额 20%，需要扣成本后仍正：
-    ``4倍 × 0.126% = 0.5%`` —— 成本占比很低，不是问题。
-
-    真正的风险不在成本，在**因子衰减**和**个股集中度**，见 build_long_only。
-    """
-    if cost.buy <= 0:
-        return float("inf")
-    return target_annual_return / cost.buy
-
-
-# 手动交易的年换手上限（现实约束，非成本约束）
-MANUAL_TURNOVER_CAP = 6.0
-
-
-def manual_turnover_note() -> str:
-    return (f"手动交易年换手上限约 {MANUAL_TURNOVER_CAP:.0f} 倍"
-            f"（月频 3~4 倍 / 季频 1~1.5 倍）。"
-            f"对应年成本 {MANUAL_TURNOVER_CAP * CostModel().buy * 100:.2f}%，"
-            f"不是瓶颈。")
-
-
-# ── A 股特有的交易约束 ────────────────────────────────────────
-# ⚠️ `TradabilityFilter` / `limit_state` 已拆到 `tradable.py`（2026-10-06）。
-#    原因：本文件加注释后达 502 行，超过「≤500 行」硬性门禁。
-#    **这两个符号无生产调用方，且涨跌停约束实际从未生效过** ——
-#    `limit_state` 的 Series 分支必崩、缺数据口径还与 `limit_masks` 相反。
-#    详见 `tradable.py` 的模块 docstring。
-
-
-# ── 持仓构建 ──────────────────────────────────────────────────
-@dataclass
-class PortfolioSpec:
-    """一个可执行的多头组合方案。"""
-
-    name: str
-    n_hold: int = 30# 持股数
-    n_pick: int = 100          # 从 n_pick 里选 n_hold（给换手留缓冲）
-    rebalance: str = "M"       # 调仓频率：M=月初 Q=季初 W=周初
-    max_weight: float = 0.15# 单票上限
-    min_weight: float = 0.02   # 单票下限
-    vol_target: float = 0.20   # 目标年化波动
-    vol_lookback: int = 60
-    stop_loss: float = -0.20   # 个股止损线
-    max_drawdown: float = 0.25 # 组合最大回撤容忍
-    factor: str = ""
-    extra: dict = field(default_factory=dict)
-
-    def describe(self) -> str:
-        return (f"{self.name}: 持股 {self.n_hold}/{self.n_pick}只 · "
-                f"{self.rebalance}调仓 · 单票 ≤{self.max_weight:.0%} · "
-                f"目标波动 {self.vol_target:.0%} · 止损 {self.stop_loss:.0%}")
+# ⚠️ **re-export**：`PortfolioSpec` / `_normalize_bounded` 已搬到 `spec.py`，
+#   但外部调用方（含既有测试）从 `long_only` 导入它们。
+#   ⇒ 这里显式再导出，避免一次拆分就打断所有调用方。
+__all__ = [
+    "PortfolioSpec",
+    "_normalize_bounded",
+    "build_long_only",
+    "simulate_matrix",
+    "rebalance_days",
+    "holdout_split",
+]
 
 
 def build_long_only(
@@ -152,6 +69,8 @@ def build_long_only(
     spec: PortfolioSpec,
     cost: CostModel,
     price_panel: pd.DataFrame | None = None,
+    buy_ok: pd.DataFrame | None = None,
+    sell_ok: pd.DataFrame | None = None,
 ) -> dict:
     """构建单边多头组合并做样本内检验。
 
@@ -166,6 +85,13 @@ def build_long_only(
                     是 z 分数（可为负、可跨股票差 10 倍），
                     比值的分布毫无意义，实测单日收益出现 100 倍以上的值，
                     年化波动 33,494%、回撤 −261,897%，净值被打爆。
+    buy_ok/sell_ok: 索引=日期，列=代码的 bool 面板，
+                    True = 当日可买/ 可卖。None = 不施加涨跌停约束。
+                    ⚠️ **必须与 factor_values 的索引、列完全一致** ——
+                       `align_masks` 按**标签**校验，索引或列不一致会
+                       **直接抛错**（ValueError），不会静默错配。
+                       （早期版本按下标对齐，列序不同会静默错配；
+                        标签校验即为此而加。）
 
     返回
     ----
@@ -234,15 +160,29 @@ def build_long_only(
     #   参数扫描表「候选池大小」那一列数值一模一样 —— 那是假象。
     #   现在真正实现缓冲带语义：持仓股只要还在 top n_pick 内就不卖。
     top_idx = rank_topk(fv_for_top, n_pick)
-    held_mat = select_with_buffer(top_idx, is_rebal, n_hold)
+
+    # ⚠️⚠️ **涨跌停约束接在这里**（2026-10-06 接线，此前从未生效）：
+    #   `tradability.py` 建好了、`limit_masks` 有覆盖率自检，
+    #   但**全项目零生产调用方** —— 所有已披露结论都是在
+    #   「假设涨跌停板随时能成交」下得出的。
+    #   本项目的因子（反转）选的正是「刚跌过」的股票，
+    #   而跌停股恰恰是「跌得最狠、最卖不掉」的那一批 ⇒ 影响不是随机噪声。
+    #
+    #   对齐与形状校验在 `selection.align_masks`（选股侧职责）。
+    buy_m, sell_m = align_masks(buy_ok, sell_ok, factor_values)
+    held_mat = select_with_buffer(top_idx, is_rebal, n_hold,
+                                  buy_ok=buy_m, sell_ok=sell_m)
 
     inv = np.where(vol_mat > 0, 1.0 / vol_mat, np.nan)
-    # ⚠️ **必须先把 -1 哨兵屏蔽掉**，不能用 clip(下界, 0) 代替：
+    # ⚠️ **必须先把 -1 哨兵挡住，不能让它进 `np.take_along_axis`**，也不能用
+    #   clip(下界, 0) 代替：
     #   `np.take_along_axis` 用的是**负索引语义** ——
     #   held_mat 里的 -1 会取到**最后一列**（某只真实存在的股票），
     #   而不是「无持仓」。
     #   实测踩过：把 0 当哨兵同样错，列索引 0 是真实股票（如 sh600000）。
-    #   所以 sentinel 必须是 -1，且必须**在 take 之前**显式置 NaN。
+    #   ⇒ 实际步骤是两步：take 时用 `held_safe` 把哨兵槽**临时占位**成列 0，
+    #     take 之后立刻由 `bad` 掩码（含 `held_mat < 0`）把哨兵槽的取值
+    #     连同非法逆波动率一起置 NaN —— 哨兵槽不携带任何列 0 的信息。
     held_safe = np.where(held_mat < 0, 0, held_mat)
     picked_inv = np.take_along_axis(inv, held_safe, axis=1)
     bad = (held_mat < 0) | ~np.isfinite(picked_inv) | (picked_inv <= 0)
@@ -254,18 +194,39 @@ def build_long_only(
     degenerate = (n_valid < n_hold * 0.5) | (ssum[:, 0] <= 0) | allnan
     ssum = np.where(ssum <= 0, 1.0, ssum)
     w_mat = w_mat / ssum
+    # ⚠️ `degenerate`（有效持仓不足一半）⇒ 退化为等权。
+    #   必须**在带约束归一化之前**处理：等权1/n_hold 天然满足上下限，
+    #   而逆波动率权重经过归一化后**必然触顶**（少数高波动槽被压到hi，
+    #   剩余权重分摊给其余槽位），这正是需要约束投影的场景。
     w_eq = np.full((T, n_hold), 1.0 / n_hold)
     w_mat = np.where(degenerate[:, None], w_eq, w_mat)
-    w_mat = np.clip(w_mat, spec.min_weight, spec.max_weight)
-    # ⚠️ **clip 之后必须重新屏蔽哨兵**（review 2026-10-06 抓出，BLOCK）：
-    #   上面刚把哨兵槽位置0，但 `np.clip(0, min_weight=0.02, ...)`
-    #   会把它抬成 0.02 —— 权重凭空出现。
-    #   实测：3槽持仓含1 个哨兵 → 哨兵权重 0 → clip 后 2% → 再归一化后 **6.25%**，
-    #   而 `held_safe` 已把 -1 映射到列 0（**一只真实存在的股票**），
-    #   下面的散射赋值 `W[rows, held_safe] = w_mat` 就把这 6.25% 打到了它身上。
-    #   ⇒注释里「哨兵槽位权重为 0，不会凭空建仓」这句在 clip 之后是**错的**。
+    # ⚠️ **哨兵槽位（held_mat < 0）权重恒为 0**，不能参与归一化 ——
+    #   否则 `n_hold=30` 里若有 1 个哨兵，就会拿 29 个槽位去凑 100%，
+    #   凭空把其余权重抬高 3.4%。它们代表「这一格没有持仓」，
+    #   `held_safe` 会把 -1 映射到列 0（**一只真实存在的股票**），
+    #   权重算错就等于给一只没打算买的股票建仓。
     w_mat = np.where(held_mat < 0, 0.0, w_mat)
-    w_mat = w_mat / np.maximum(w_mat.sum(axis=1, keepdims=True), 1e-12)
+    # 🔴🔴 **BLOCK（review 2026-10-06 抓出）：clip 后不能再等比归一化**
+    #   初版是 `np.clip(...)` 接 `w_mat / w_mat.sum(...)`，
+    #   但**除以行和必然把权重和拉回 1**，而 `sum < 1` 时是**等比放大**
+    #   ⇒ clip 的效果被完全抹掉。
+    #
+    #   实测（max_weight=0.15，3 个有效槽 + 1 哨兵）：
+    #       原始逆波动率 [0.50, 0.30, 0.20] → clip → [0.15, 0.15, 0.15, 0.02]
+    #       → 等比归一化 → **[0.333, 0.333, 0.333]**  = 上限的 **2.22 倍**
+    #
+    #   ⇒ `max_weight` 是**死参数**，而 `PortfolioSpec.describe()`
+    #      正在向用户打印「单票 ≤15%」—— **文档声明与实际行为相反**。
+    #      这正是 ENGINEERING.md 第四节点名的「不报错但结论完全颠倒」。
+    #
+    #   ⚠️ 1397eac / f08667d 都把它误标为「`degenerate` 兜底绕过 max_weight」
+    #      的局部问题。实测**正常路径同样绕过**，
+    #      只改 `degenerate` 分支会漏掉主路径。
+    #
+    #   正解：**带上下限约束的归一化**（水位法投影）。
+    #   不是「先 clip 再归一化」，而是「归一化时就把上下限算进去」。
+    w_mat = _normalize_bounded(w_mat, spec.min_weight, spec.max_weight,
+                               active_mask=held_mat >= 0)
 
     # 非调仓日**沿用上一期权重**。
     # ⚠️ held_mat **不要**再 carry_forward —— select_with_buffer 内部已经
@@ -277,8 +238,17 @@ def build_long_only(
     w_mat[:first] = 0.0
     w_mat = w_mat / np.maximum(w_mat.sum(axis=1, keepdims=True), 1e-12)
 
-    return simulate_matrix(factor_values.index, held_mat, w_mat,
-                           fwd, cost, spec)
+    res = simulate_matrix(factor_values.index, held_mat, w_mat,
+                          fwd, cost, spec)
+    # ⚠️ **必须把 held_mat 带出去**（2026-10-06 review BLOCK）：
+    #   「涨跌停约束到底生效了没有」只能通过**检查实际持仓**回答 ——
+    #   持仓里若还有封涨停的票，说明约束没生效。
+    #   而 `held_mat` 原先是 `simulate_matrix` 的局部变量，调用方拿不到
+    #   ⇒ `run_limit_constraint` 里的校验函数 `verify_constraint_active`
+    #   **接不上**（签名要held_mat，返回值里没有），只能空转。
+    #   ⇒ 无条件附带（非 ok 时也给 None），调用方自行判None。
+    res["held_mat"] = held_mat if res.get("ok") else None
+    return res
 
 
 def rebalance_days(dates, freq: str) -> np.ndarray:
@@ -300,174 +270,6 @@ def rebalance_days(dates, freq: str) -> np.ndarray:
     change = np.ones(len(key), dtype=bool)
     change[1:] = key[1:] != key[:-1]
     return np.where(change)[0]
-
-
-def _carry_forward(mat: np.ndarray, is_rebal: np.ndarray) -> np.ndarray:
-    """非调仓日沿用上一期的值（矩阵按行前向填充）。
-
-    ⚠️ 用 index-based 而非 pandas ffill：宽表 (2611, 30) 上
-    pandas 的 ffill 逐列循环，11 年 × 30 列实测很慢。
-    numpy 前向填充只需一次 cumsum 索引。
-    """
-    out = mat.copy()
-    last = np.zeros(mat.shape[1], dtype=mat.dtype)
-    for i in range(mat.shape[0]):
-        if is_rebal[i]:
-            last = out[i]
-        else:
-            out[i] = last
-    return out
-
-
-def _year_span(dates) -> float:
-    """区间年数（自然日口径）。
-
-    ⚠️ **整个项目只有一个年化定义**，策略与基准共用。
-       初版策略用自然日、基准用 `len/252`，同一份收益算出两个年化，
-       「超额」直接偏 0.5pp/年 —— 而超额是所有结论的判据。
-
-    ⚠️ 退化保护：区间不足 1 天时 `days=0` 会除零，故用 `max(..., 1e-9)` 兜底。
-
-    ⚠️⚠️ **短区间年化会严重放大，这是口径的固有性质，不是 bug**：
-       几何年化 `nav**(1/years)-1` 在 years 很小时极不稳定。
-       实测同一份 +8% 累计收益：
-         20 个交易日(0.074 年) → 年化 **+183%**
-         60 个交易日(0.227 年) → 年化 **+40%**
-         1年(0.931 年)        → 年化 **+8.6%**
-       ⇒ **本函数不做下限保护，也不该假装做了**。
-         下限保护属于「调用方该不该用这个窗口」的判断，
-         混进年化函数里会让调用方以为短窗口是安全的。
-         `walk_forward.make_windows` 已用 `len(te) >= 60` 过滤短窗口，
-         那里才是该加约束的地方。
-       （此前此处 docstring 声称本函数已加天数下限，实测代码里并没有 ——
-         注释与实现不符比没有注释更危险，故删除该声明。）
-    """
-    if len(dates) < 2:
-        return 1e-9
-    d0, d1 = dates[0], dates[-1]
-    if hasattr(d0, "year"):                      # Timestamp 索引
-        days = (d1 - d0).days
-    else:                                        # 位置索引，兜底按交易日折算
-        # YEAR_TRADING_DAYS = 243 = ② 时长换算兜底层（A 股实测年均交易日
-        #   2,611 交易日 ÷ 10.75 历年 = 242.9，见 PITFALLS P10（1·补）②层）。
-        # ⚠️ 这条分支是**兜底**，与主口径（自然日 365.25，③ 层）不同；
-        #   混用会让同一份收益算出两个年数，正是本函数要消灭的问题。
-        return max(len(dates) / YEAR_TRADING_DAYS, 1e-9)
-    return max(days / 365.25, 1e-9)
-
-
-def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
-                    cost: CostModel, spec: PortfolioSpec) -> dict:
-    """矩阵版回测：全程 numpy，不碰 pandas 索引。
-
-    ⚠️ **性能**：初版逐日 `fwd.loc[d, w.index]` 做标签查找，
-       5,606 只 × 2,611 日跑 20 分钟未完成。
-       现在把收益矩阵与持仓矩阵一起按位置索引，全向量化。
-    """
-    r_mat = fwd.to_numpy(dtype=float)          # (T, N) 前视修正后的收益
-    r_mat = np.nan_to_num(r_mat, nan=0.0)
-    # ⚠️ **T 必须取自 dates（不是 r_mat）**（review 2026-10-06）：
-    #   `gross` / `w_mat` / `held_mat` 全都是**按 dates 对齐**的，
-    #   原先写 `T = r_mat.shape[0]` 是假设两者等长。
-    #   当 fwd 末位没有下一期收益（行数 = len(dates)-1）时，
-    #   T 少 1 → `gross[ok]` 与 `w_mat[ok]` 形状不匹配，报
-    #   `IndexError: boolean index did not match ... size 4 but size 5`。
-    #   生产路径恰好等长（shift 保留全行、末行填 NaN），所以这个 bug 一直藏着，
-    #   直到测试用真实的 (T-1) 行 fwd 才暴露 —— 典型的「靠巧合活着」。
-    T = len(dates)
-    # fwd 行数可能少于 dates（末位无下一期收益）⇒ 夹住上界
-    n_r = min(len(r_mat), T)
-    date_pos = {d: i for i, d in enumerate(dates)}
-    pos = np.array([date_pos.get(d, -1) for d in dates])
-    ok = (pos >= 0) & (pos < n_r)
-
-    # ⚠️⚠️ **哨兵绝不能映射到列 0**（实测发现，比 review 报的 BLOCK-1 更隐蔽）：
-    #   `held_safe = np.where(held_mat < 0, 0, held_mat)` 把哨兵指向**第 0 列**，
-    #   而第 0 列**本身就是一只真实持仓**（`held_mat` 里可能已经有 0）。
-    #   散射赋值 `W[rows, idx] = vals` 对重复下标是**后写覆盖**——
-    #   哨兵槽的权重 0 会把真实持仓 c0 的权重**直接抹成 0**。
-    #   实测：c0 权重 0.6 被抹成 0，组合日收益从 +0.2% 掉到 −0.4%。
-    #   ⇒ 给哨兵一个**独立的垃圾列**：收益矩阵与 W 都多一列（全 0），
-    #     真实列仍是0..N-1。该列收益恒 0、权重恒 0，双重零贡献。
-    sentinel_col = r_mat.shape[1]             # 真实列是 [0, r_mat.shape[1])
-    r_ext = np.column_stack([r_mat, np.zeros(len(r_mat))])
-    held_idx = np.where(held_mat < 0, sentinel_col, held_mat)
-
-    # 组合每日收益 = Σ w[i,t] × r[t, held[i,t]]
-    gross = np.zeros(T)
-    if ok.any():
-        # ⚠️ 索引顺序：`held_idx[ok]` 是 (T_ok, n_hold)，`pos[ok]` 是 (T_ok,)，
-        #    numpy 广播时**行索引必须先取 held 再取 pos**，写反会形状不匹配。
-        rr = r_ext[pos[ok][:, None], held_idx[ok]]   # (T_ok, n_hold)
-        gross[ok] = np.nansum(w_mat[ok] * rr, axis=1)
-
-    # 换手 = |w_t - w_{t-1}| 在**全股票空间**上的 L1 差
-    # ⚠️ 必须在全 N 只上算，只在持仓股票上算会漏掉「卖出的股票」，
-    #    实测那种算法换手率被低估约一半。
-    W = np.zeros((T, sentinel_col + 1), dtype=float)   # 末列 = 哨兵垃圾列
-    rows_ok = np.where(ok)[0]
-    if len(rows_ok):
-        # ⚠️ 需要把行索引扩展成二维 (T_ok, 1)，
-        #    否则 (T_ok,) 与 (T_ok, n_hold) 广播失败。
-        W[rows_ok[:, None], held_idx[rows_ok]] = w_mat[rows_ok]
-    dW = np.abs(np.diff(W, axis=0, prepend=W[:1]))
-    turn = dW.sum(axis=1)
-
-    # ⚠️⚠️ **换手必须按 ok 夹取**（review 2026-10-06 复核抓出，BLOCK）：
-    #   `ok=False` 的行（末位没有下一期收益）其 `W` 全为 0，
-    #   而 `np.diff` 会把「有仓 → 0」视为**清仓** ⇒ `turn` = 1.0。
-    #   该行既没有收益发生，却被扣一次全额往返成本 ⇒ **凭空少赚**。
-    #   实测（T=5、fwd 4 行、默认成本）：末行 turn=1.0、cost=0.00151，
-    #   在 4 个交易日的窗口里把年化从 107.46% 压到 80.72%（**低估 26pp**）。
-    #   ⚠️ 生产路径恰好等长（`pct_change().shift(-1)` 保留全行）所以不触发，
-    #      这正是「靠巧合活着」的典型 —— 一旦有第二个调用方传短 fwd 就中招。
-    #   ⇒ 换手与成本都只认有收益发生的行。
-    turn = np.where(ok, turn, 0.0)
-    cost_arr = turn * (cost.buy + cost.sell) / 2
-    net = gross - cost_arr
-    # ⚠️ nav 同样只能在 ok 行上复利：非 ok 行既无收益也无成本，
-    #   留着只会污染「累计净值」这个对外报出的数字。
-    nav_all = np.cumprod(1.0 + net)
-    nav = nav_all[ok] if ok.any() else nav_all
-    dates = np.asarray(dates)[ok] if ok.any() else np.asarray(dates)
-
-    if len(nav) < 2 or not np.isfinite(nav[-1]) or nav[-1] <= 0:
-        return {"ok": False, "reason": "净值序列异常"}
-
-    rr = pd.Series(net).replace([np.inf, -np.inf], np.nan).dropna()
-
-    # ⚠️ **年化口径必须与基准侧一致**，否则「超额 = 策略 − 基准」是错的。
-    #   实测踩过（review 2026-10-06发现）：
-    #     策略侧用**自然日**：364 天跨度 / 365.25 = 0.9966 年
-    #     基准侧用**交易日**：261 个交易日 / 252 = 1.0357 年
-    #   同一份收益，两个年化差 0.50pp/年，而「超额」是全部结论的判据。
-    #   ⇒ 统一为**自然日**口径（几何年化的标准定义）。
-    #
-    # ⚠️ 不用 `len(net)/252`：A 股一年实际约 243~245 个交易日，
-    #   252 是美股口径，用它会让「年数」偏大约 3.5%，年化被系统性压低。
-    years = _year_span(dates)
-    cagr = float(nav[-1] ** (1 / years) - 1) if nav[-1] > 0 else -1.0
-    vol = float(rr.std() * np.sqrt(SCALING_TRADING_DAYS))
-    sharpe = float(cagr / vol) if vol > 0 else np.nan
-    nav_s = pd.Series(nav, index=dates, dtype=float)
-    dd = float((nav_s / nav_s.cummax() - 1).min())
-
-    return {
-        "ok": True,
-        "组合": spec.name,
-        "因子": spec.factor,
-        "调仓频率": spec.rebalance,
-        "持股数": spec.n_hold,
-        "累计净值": float(nav[-1]),
-        "年化收益": cagr,
-        "年化波动": vol,
-        "夏普": sharpe,
-        "最大回撤": dd,
-        "平均换手": float(turn[ok].mean()) if ok.any() else 0.0,
-        "平均年成本": float(cost_arr[ok].mean() * SCALING_TRADING_DAYS) if ok.any() else 0.0,
-        "年化毛收益": float(cagr + cost_arr[ok].mean() * SCALING_TRADING_DAYS) if ok.any() else cagr,
-        "期数": int(T),
-    }
 
 
 def holdout_split(dates, train_frac: float = 0.7) -> tuple:
