@@ -155,6 +155,10 @@ class TestLongOnlyDataDeps:
         漏了后面的 `cols += [...]`，报了假失败。
         诊断工具的可信度不高于被诊断代码（S12）。
         故这里真的从库里取一小段数据，用真实列名跑因子。
+
+        ⚠️ 依赖真实数据库 `data/market.db`（不进 git）：
+        库不存在即跳过（CI 干净环境、未下载数据的环境），
+        有库环境照常真跑。
         """
         import sqlite3
         import numpy as np
