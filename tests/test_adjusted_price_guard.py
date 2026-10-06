@@ -50,6 +50,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from factor_lab.config import DB_PATH  # noqa: E402
 from factor_lab.data import load_factor_prices, load_prices  # noqa: E402
 
 SCRIPTS = ROOT / "research" / "scripts"
@@ -94,6 +95,10 @@ def test_field_is_required():
         "实测未复权口径年化偏差可达 −16.80pp。")
 
 
+@pytest.mark.skipif(
+    not DB_PATH.exists(),
+    reason="缺数据产物：data/market.db",
+)
 def test_factor_prices_returns_both_panels():
     """双口径接口：能取到两个面板，且索引完全一致。"""
     p = load_factor_prices(["sh600519", "sz000001"], "20240101", "20241231")
@@ -105,6 +110,10 @@ def test_factor_prices_returns_both_panels():
     assert (raw - adj).abs().to_numpy().max() > 0, "raw 与 adj 完全相同，复权没生效"
 
 
+@pytest.mark.skipif(
+    not DB_PATH.exists(),
+    reason="缺数据产物：data/market.db",
+)
 def test_factor_prices_rejects_empty_adjusted():
     """adj 为空时必须抛错，禁止静默退回未复权价。"""
     with pytest.raises(ValueError, match="价格面板为空"):
