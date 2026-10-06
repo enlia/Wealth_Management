@@ -20,6 +20,12 @@
 两种量纲都能反推出正确股价，所以单看反推无法区分 ——
 必须与**已知的真值**（Tushare 数据）对比才能发现量纲错误。
 
+同源反推法的第二个战场是每股净资产（bps）：分子口径必须是**普通股权益**。
+归母权益里可能含其他权益工具（优先股/永续债），bps 却是每股【普通股】净资产，
+两者混用差 17% 也不报错（实证见下方 U6 段）。反推式固定为
+
+    implied_bps = (归母权益 − COALESCE(oth_eqt_tools, 0)) × 1e8 / 总股本
+
 用法
 ----
   uv run python research/scripts/check_units.py
@@ -44,6 +50,93 @@ PROBES = [
 ]
 
 TOL = 0.01          # 1% 容差（Tushare 与通达信都只保留有限小数）
+
+
+# ── 每股净资产反推口径：普通股权益（UNITS U6）────────────────────
+# 「每股净资产 = 归母权益 ÷ 总股本」是错的：归母权益可能含其他权益工具
+# （优先股/永续债），而 bps 是每股【普通股】净资产，分子必须扣除其他权益工具：
+#     C 式 implied_bps = (归母 − COALESCE(oth_eqt_tools, 0)) × 1e8 / 总股本  ← 固定采用
+#     A 式 implied_bps = 归母 × 1e8 / 总股本                                ← 仅对照（不扣旧口径）
+# A 败 C 胜 = 其他权益工具口径混装（实证：sz000001 的 800 亿其他权益工具未扣
+# → 反推偏差 17.09%，扣除后 1e-7 级闭合；见
+#   .planning/reports/a18-sz000001-bps-forensics.md）。
+# 金额口径：ts_ 表亿元（U2）、ts_balance_sheet.total_share 为股（U3）——×1e8 换成元。
+U6_FORMULA_C = (
+    "(total_hldr_eqy_exc_min_int - COALESCE(oth_eqt_tools, 0)) × 1e8 / total_share"
+)
+FAMILY_OTH_EQT_TOOLS = "其他权益工具族"
+
+
+def ordinary_equity_yi(exc_min_int_yi, oth_eqt_tools_yi):
+    """C 式分子：归属母公司普通股股东权益（亿元）= 归母 − COALESCE(oth_eqt_tools, 0)。
+
+    oth_eqt_tools 行内 NULL = 合法「无其他权益工具」，按 COALESCE 语义归 0（U6 明文）；
+    归母权益为 NULL 属数据缺失，显式抛错，不静默按 0 反推。
+    """
+    if exc_min_int_yi is None:
+        raise ValueError(
+            "归属母公司股东权益合计为 NULL —— 无法反推每股普通股净资产，先补数再对账"
+        )
+    oth = 0.0 if oth_eqt_tools_yi is None else float(oth_eqt_tools_yi)
+    return float(exc_min_int_yi) - oth
+
+
+def implied_bps_c(exc_min_int_yi, oth_eqt_tools_yi, total_share):
+    """C 式（U6 固定式）：`(归母 − 其他权益工具) × 1e8 / 总股本`，返回元/股。"""
+    if not total_share:
+        raise ValueError(f"总股本缺失或为 0（total_share={total_share!r}）—— 反推分母不可用")
+    return ordinary_equity_yi(exc_min_int_yi, oth_eqt_tools_yi) * 1e8 / float(total_share)
+
+
+def implied_bps_a(exc_min_int_yi, total_share):
+    """A 式（对照列，旧口径）：分子不扣其他权益工具的 `归母 × 1e8 / 总股本`。"""
+    if not total_share:
+        raise ValueError(f"总股本缺失或为 0（total_share={total_share!r}）—— 反推分母不可用")
+    return float(exc_min_int_yi) * 1e8 / float(total_share)
+
+
+def compare_bps_with_db(db_bps, exc_min_int_yi, oth_eqt_tools_yi, total_share) -> dict:
+    """C 式对账 db_bps + A 式对照 + 口径混装族标记。
+
+    A 式败（rel ≥ 1%）而 C 式胜 → family = 其他权益工具族（口径混装自动归因）；
+    两式同判则 family=None。C 式仍败属未知族，只记数不归因（UNKNOWN，禁止填空）。
+    """
+    if not db_bps:
+        raise ValueError(f"db_bps 缺失或为 0（{db_bps!r}）—— 无对账基准")
+    ic = implied_bps_c(exc_min_int_yi, oth_eqt_tools_yi, total_share)
+    ia = implied_bps_a(exc_min_int_yi, total_share)
+    rel_c = abs(ic - float(db_bps)) / abs(float(db_bps))
+    rel_a = abs(ia - float(db_bps)) / abs(float(db_bps))
+    pass_c = rel_c < TOL
+    pass_a = rel_a < TOL
+    return {
+        "implied_c": ic, "rel_c": rel_c, "pass_c": pass_c,
+        "implied_a": ia, "rel_a": rel_a, "pass_a": pass_a,
+        "oth_eqt_tools_yi": oth_eqt_tools_yi,
+        "family": FAMILY_OTH_EQT_TOOLS if (pass_c and not pass_a) else None,
+    }
+
+
+def require_oth_eqt_tools_column(con: sqlite3.Connection) -> None:
+    """显式校验 ts_balance_sheet 存在 oth_eqt_tools 列（C 式分子的前提）。
+
+    缺列与行内 NULL 是两回事：NULL=合法「无其他权益工具」按 COALESCE 归 0；
+    缺列=库太旧、无法执行 C 式扣减，必须抛错，禁止静默按 0 绕过（口径会再次错位）。
+    """
+    tables = {
+        r[0]
+        for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='ts_balance_sheet'"
+        )
+    }
+    if "ts_balance_sheet" not in tables:
+        raise RuntimeError("ts_balance_sheet 表不存在 —— C 式反推无法执行")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(ts_balance_sheet)")}
+    if "oth_eqt_tools" not in cols:
+        raise RuntimeError(
+            "ts_balance_sheet 缺 oth_eqt_tools 列 —— C 式分子无法扣除其他权益工具，"
+            "禁止静默按 0 处理（会让含优先股/永续债的票反推偏差 17% 量级且不报错）"
+        )
 
 
 def check_self_consistency(con: sqlite3.Connection) -> list[str]:
