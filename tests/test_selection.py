@@ -17,6 +17,7 @@ from factor_lab.analysis.selection import (  # noqa: E402
     rank_topk,
     select_with_buffer,
 )
+from factor_lab.config import DB_PATH  # noqa: E402
 
 
 class TestRankTopk:
@@ -136,6 +137,10 @@ class TestSelectWithBuffer:
 class TestLongOnlyDataDeps:
     """取数列必须覆盖因子声明的依赖（run_long_only.load_long_chunked）。"""
 
+    @pytest.mark.skipif(
+        not DB_PATH.exists(),
+        reason="缺数据产物：data/market.db",
+    )
     def test_取数包含成交量与成交额(self):
         """⚠️ **实测踩过（2026-10-06）**：
         取数硬编码了 OHLC+close_adj，而 `volratio5_60` 依赖 `vol`、
@@ -161,9 +166,6 @@ class TestLongOnlyDataDeps:
         from factor_lab.config import DB_PATH
         from factor_lab.factors.price_volume import FACTORY, compute_factor
 
-        if not DB_PATH.exists():
-            pytest.skip(f"缺 {DB_PATH} —— market.db 不进 git，"
-                        "无数据环境跳过，有库环境照常真跑")
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         cols = {r[1] for r in con.execute("PRAGMA table_info(bar_daily)")}
         con.close()

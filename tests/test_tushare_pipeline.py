@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
 from build_money_whitelist import NOT_MONEY_EXACT, NOT_MONEY_PATTERNS  # noqa: E402
 from fetch_all_tushare import dedup_by_business_key  # noqa: E402
-from merge_tushare_tables import ts_to_local  # noqa: E402
+from merge_tushare_tables import WHITELIST_FILE, ts_to_local  # noqa: E402
 from verify_tushare_full import check_one  # noqa: E402
 
 
@@ -130,13 +130,14 @@ class TestMoneyWhitelist:
             f"白名单不存在：{WHITELIST_FILE}\n"
             f"  解决：uv run python research/scripts/build_money_whitelist.py")
 
+    @pytest.mark.skipif(
+        not WHITELIST_FILE.exists(),
+        reason="缺数据产物：runtime/tushare/_money_whitelist.json",
+    )
     def test_实际白名单不含比率字段(self) -> None:
         import json
 
         from merge_tushare_tables import WHITELIST_FILE
-        if not WHITELIST_FILE.exists():
-            pytest.skip(f"缺 {WHITELIST_FILE}（本地产物不进 git），"
-                        "无产物环境跳过")
         wl = json.loads(WHITELIST_FILE.read_text(encoding="utf-8"))
         for cols in wl.values():
             for c in cols:
