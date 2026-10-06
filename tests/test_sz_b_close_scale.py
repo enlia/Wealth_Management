@@ -25,9 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "tools"))
 
-from tdx import price_scale  # noqa: E402
-
 import fix_sz_b_close_scale as fix  # noqa: E402
+from tdx import price_scale  # noqa: E402
 
 
 class TestPriceScale深B根因:

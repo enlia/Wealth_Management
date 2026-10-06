@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "tools"))
 
+import fix_sz_b_close_scale as fix  # noqa: E402
 from tdx import price_scale  # noqa: E402
 
-import fix_sz_b_close_scale as fix  # noqa: E402
 from factor_lab.config import is_b_share  # noqa: E402
 
 PROPOSAL_G4_PROBE = (
