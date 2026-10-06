@@ -226,14 +226,30 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
     return out
 
 
-# 因子最大回看窗口对应的前置交易日数（pos250 / mom250 需要 250 日）
+# 因子最大回看窗口对应的前置**交易日**数（pos250 / mom120 需要 250 日）
 WARMUP_TRADING_DAYS = 260
 
 
 def _shift_date(d: str, n_days: int) -> str:
-    """把 YYYYMMDD 往前推 n 个自然日（粗略即可，只需跨年边界）。"""
-    ts = pd.Timestamp(d) - pd.Timedelta(days=abs(n_days))
-    return ts.strftime("%Y%m%d")
+    """把 YYYYMMDD 往前推 n 个**交易日**（用于跨年预热）。
+
+    ⚠️ **必须按交易日算，不能用自然日**（2026-10-06 实测缺陷）：
+       初版用 `pd.Timedelta(days=260)` 减自然日，
+       260 自然日 ≈ **173 个交易日**，而 pos250 需要 **250 个交易日** ——
+       预热少了约 77 个交易日。
+
+       实测后果：`_shift_date('20240101', -260)` 返回 `20230416`，
+       正确应是 `20230102`。
+       pos250 / mom120 在每年年初会缺 ~77 个交易日的因子值，
+       11 年累积约 **850 天（3.3 年）数据被静默丢弃**。
+
+       这类缺陷不报错、不影响其他因子，只让长窗口因子**样本变少**，
+       很难被发现 —— 必须靠「跨年时检查长窗口因子的非空率」来发现。
+    """
+    ts = pd.Timestamp(d)
+    # BDay 只排除周末，不排除法定节假日 —— 偏保守（多取几天数据），
+    # 比少取安全。少取会丢样本，多取只是多读一点。
+    return (ts - pd.tseries.offsets.BDay(abs(n_days))).strftime("%Y%m%d")
 
 
 def combine(panels: dict[str, pd.DataFrame],
