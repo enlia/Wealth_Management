@@ -32,7 +32,8 @@
 ----------
   audit_price_data()      价格数据体检，输出污染规模与影响量级
   clean_returns()         清洗收益率：剔除上市首日 + 标记未复权除权日
-  judge_limit()           按板块判定当日涨跌幅是否合法
+  judge_limit_rules()     按 market_rules 判定超限（价格感知容差 + 新股窗口）
+  classify_residuals()    残留超限按形态三分类计数（成因不硬判）
 
 判定「是否修好了」的口径（重要）
 --------------------------------
@@ -68,37 +69,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from factor_lab.config import is_a_share
 from factor_lab.data import all_codes, load_prices
-from factor_lab.market_rules import limit_of, no_limit_days, price_tolerance
+from factor_lab.market_rules import (
+    board_of,
+    limit_of,
+    no_limit_days,
+    price_tolerance,
+)
 
-# 各板块的日涨跌幅限制（2026 年现行）
-LIMIT = {
-    "main": 0.10,       # 沪深主板
-    "gem": 0.20,       # 创业板 sz30
-    "star": 0.20,      # 科创板 sh688
-    "bse": 0.30,       # 北交所 bj
-}
-TOL = 1.005# 容差：涨跌停价按四舍五入，留 0.5% 缓冲
-
-
-def board_of(code: str) -> str:
-    """按代码段判定板块。"""
-    c = str(code)
-    if c.startswith("sz30"):
-        return "gem"
-    if c.startswith("sh688"):
-        return "star"
-    if c.startswith("bj"):
-        return "bse"
-    return "main"
-
-
-def judge_limit(code: str, ret: pd.Series) -> pd.Series:
-    """判断某股票每日收益是否超出该板块的涨跌幅限制。
-
-    超限即说明该日数据异常（未复权除权 / 数据错误 / 上市首日）。
-    """
-    lim = LIMIT[board_of(code)] * TOL
-    return ret.abs() > lim
+# ⚠️ 板块判定、限幅表与容差**只有 market_rules 一份实现**（统一入口）。
+#    本脚本曾内置第二套 board_of / LIMIT / 固定容差 TOL=1.005：
+#    与 market_rules 双实现并存必然漂移 —— 本地 board_of 按前缀切片把
+#    sh689009（科创板 CDR）判成主板 ±10%，固定容差把低价股真实封板
+#    误判成超限（Q2 实测误判率 87%），均已证伪。此处统一引用 market_rules。
 
 
 def judge_limit_rules(
@@ -157,7 +139,6 @@ def judge_limit_rules(
 def clean_returns(
     prices: pd.DataFrame,
     quoted_prev: pd.DataFrame | None = None,
-    use_rules: bool = False,
     timeline: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """清洗收益率，返回 (干净收益率, 异常标记)。
@@ -169,10 +150,9 @@ def clean_returns(
     参数
     ----
     prices : 被检验的价格面板（``close`` 或 ``close_adj``）
-    quoted_prev : **未复权**前收盘价面板。``use_rules=True`` 时必须传入，
-        否则容差基准错误（见 ``judge_limit_rules`` 的警告）。
-        缺省退化为 ``prices.shift(1)``，仅当 prices 本身就是报价时才正确。
-    use_rules : True 时用 market_rules 的价格感知容差 + 新股窗口判定。
+    quoted_prev : **未复权**前收盘价面板，必须传入（缺省退化为
+        ``prices.shift(1)``，仅当 prices 本身就是报价时才正确）。
+        涨跌停容差基准必须是**未复权**前收，见 ``judge_limit_rules`` 的警告。
     timeline : **未复权**价格面板，仅用于确定「交易日序号」与首个行情日。
         ⚠️ 检验 ``close_adj`` 时**必须**传入：
         close_adj 有 NULL（1.6% 的 A 股行）时，用它自己的非空位置算序号会
@@ -195,18 +175,15 @@ def clean_returns(
         r = ret[c].dropna()
         if len(r) == 0:
             continue
-        if use_rules:
-            pc = prev_close[c].reindex(r.index)
-            # 交易日序号用**未复权时间线**（timeline），不用 close_adj 自身：
-            # 后者有 NULL 时位置会错位，把新股窗口判到错误的日期上。
-            valid = tl[c].dropna().index if c in tl else prices[c].dropna().index
-            pos = {d: i + 1 for i, d in enumerate(valid)}
-            tdi = pd.Series([pos.get(d, 1) for d in r.index], index=r.index)
-            # 首个行情日（YYYYMMDD），用于判断是否适用注册制新股 5 日窗口
-            fd = int(valid[0].strftime("%Y%m%d")) if len(valid) else None
-            over = r.index[judge_limit_rules(c, r, pc, tdi, fd).to_numpy()]
-        else:
-            over = r.index[r.abs() > LIMIT[board_of(c)] * TOL]
+        pc = prev_close[c].reindex(r.index)
+        # 交易日序号用**未复权时间线**（timeline），不用 close_adj 自身：
+        # 后者有 NULL 时位置会错位，把新股窗口判到错误的日期上。
+        valid = tl[c].dropna().index if c in tl else prices[c].dropna().index
+        pos = {d: i + 1 for i, d in enumerate(valid)}
+        tdi = pd.Series([pos.get(d, 1) for d in r.index], index=r.index)
+        # 首个行情日（YYYYMMDD），用于判断是否适用注册制新股 5 日窗口
+        fd = int(valid[0].strftime("%Y%m%d")) if len(valid) else None
+        over = r.index[judge_limit_rules(c, r, pc, tdi, fd).to_numpy()]
         if len(over):
             # ⚠️ 必须用 .loc[index, col] 逐列赋值。
             #    若 over 为空 Index，`bad.loc[empty_index, c] = True`
@@ -219,19 +196,18 @@ def clean_returns(
 def audit_price_data(
     prices: pd.DataFrame,
     verbose: bool = True,
-    use_rules: bool = True,
     quoted_prev: pd.DataFrame | None = None,
     timeline: pd.DataFrame | None = None,
 ) -> dict:
     """价格数据体检。
 
-    use_rules=True（默认）用 ``market_rules`` 的价格感知容差 + 新股窗口判定。
+    判定走 ``market_rules`` 的价格感知容差 + 新股窗口（统一入口，无第二套口径）。
     quoted_prev / timeline 为**未复权**面板；检验 close_adj 时**必须**传入，
     否则会用后复权价算容差、把合法涨跌停误判成超限。
     """
     ret = prices.pct_change(fill_method=None)
     clean, bad = clean_returns(prices, quoted_prev=quoted_prev,
-                               use_rules=use_rules, timeline=timeline)
+                               timeline=timeline)
     n_tot = int(ret.notna().sum().sum())
     n_bad = int(bad.sum().sum())
     abs_all = float(ret.abs().stack().sum())
@@ -330,7 +306,7 @@ def main() -> int:
     print("逐板块异常分布")
     print("=" * 70)
     _, bad = clean_returns(prices, quoted_prev=quoted_prev,
-                             use_rules=True, timeline=quoted_panel)
+                             timeline=quoted_panel)
     for b in ["main", "gem", "star", "bse"]:
         cols = [c for c in prices.columns if board_of(c) == b]
         if not cols:
