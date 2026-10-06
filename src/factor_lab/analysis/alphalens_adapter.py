@@ -35,7 +35,7 @@ import pandas as pd
 
 from alphalens import performance, utils
 
-from ..config import CostModel, ResearchConfig
+from ..config import CostModel, ResearchConfig, SCALING_TRADING_DAYS
 
 
 def _col(period: int) -> str:
@@ -212,8 +212,9 @@ def run_tear_sheet(
     #   正确做法：先把每期差值折算成年化，再扣年化成本。
     #     年化毛   = 每期差值 × (252 / periods[0])
     #     年化成本 = 往返费率 × 平均单期换手 × 分组数 × (252 / periods[0])
-    #   252 = A 股年交易日数近似值。
-    periods_per_year = 252.0 / periods[0]
+    #   252 = ① 倍数换算层常数（config.SCALING_TRADING_DAYS），不是
+    #   「A 股年均交易日」——时长换算层是 243（YEAR_TRADING_DAYS），两层勿串用。
+    periods_per_year = SCALING_TRADING_DAYS / periods[0]
     gross = spread * periods_per_year
     net = gross - cost.round_trip * turnover_mean * quantiles * periods_per_year
 
