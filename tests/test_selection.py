@@ -4,19 +4,27 @@
 """
 from __future__ import annotations
 
+import re
+import sqlite3
 import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "research" / "scripts"))
 ROOT = Path(__file__).resolve().parents[1]
 
 from factor_lab.analysis.selection import (  # noqa: E402
     rank_topk,
     select_with_buffer,
 )
+from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+from factor_lab.data import all_codes  # noqa: E402
+from factor_lab.factors.price_volume import FACTORY, compute_factor  # noqa: E402
+from run_long_only import WARMUP_TRADING_DAYS, _shift_date, build_panel  # noqa: E402
 
 
 class TestRankTopk:
@@ -151,12 +159,6 @@ class TestLongOnlyDataDeps:
         诊断工具的可信度不高于被诊断代码（S12）。
         故这里真的从库里取一小段数据，用真实列名跑因子。
         """
-        import sqlite3
-        import numpy as np
-        import pandas as pd
-        from factor_lab.config import DB_PATH
-        from factor_lab.factors.price_volume import FACTORY, compute_factor
-
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         cols = {r[1] for r in con.execute("PRAGMA table_info(bar_daily)")}
         con.close()
@@ -209,9 +211,6 @@ class TestWarmupWindow:
         不报错、不影响其他因子，只让长窗口因子样本变少 ——
         这类缺陷最难发现。
         """
-        import sys as _s
-        _s.path.insert(0, str(ROOT / "research" / "scripts"))
-        from run_long_only import _shift_date
         got = _shift_date("20240101", -260)
         assert got <= "20230103", (
             f"预热起点 {got} 太晚 —— 应覆盖到 2023-01-02 左右。"
@@ -220,12 +219,7 @@ class TestWarmupWindow:
 
     def test_预热天数足够覆盖最长窗口(self):
         """WARMUP_TRADING_DAYS 必须 >= 最长因子窗口。"""
-        import sys as _s
-        _s.path.insert(0, str(ROOT / "research" / "scripts"))
-        from run_long_only import WARMUP_TRADING_DAYS
-        from factor_lab.factors.price_volume import FACTORY
         # 从注册表里挖出所有窗口参数的最大值
-        import re
         src = (ROOT / "src" / "factor_lab" / "factors"
                / "price_volume.py").read_text(encoding="utf-8")
         nums = [int(m) for m in re.findall(r'FACTORY.*?(\d+)', src)]
@@ -252,11 +246,6 @@ class TestWarmupWindow:
         长窗口因子在首年大面积 NaN，
         表现为「因子没数据」，容易被误判成「该股不合格」。
         """
-        import sys as _s
-        _s.path.insert(0, str(ROOT / "research" / "scripts"))
-        from factor_lab.config import is_a_share
-        from factor_lab.data import all_codes
-        from run_long_only import build_panel
         codes = [c for c in all_codes() if is_a_share(c)][:150]
         p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
         cov250 = float(p["pos250"].notna().mean().mean())
@@ -282,9 +271,6 @@ class TestWarmupWindow:
         保护（去重/裁剪）必须落在返回值上，不能只落在内部局部变量上，
         否则测试与运行时读到的恰是没被保护的对象。
         """
-        from factor_lab.config import is_a_share
-        from factor_lab.data import all_codes
-        from run_long_only import build_panel
         codes = [c for c in all_codes() if is_a_share(c)][:150]
         p = build_panel(codes, ["rev5"], "20190101", "20201231")
         px = p["__price__"]
