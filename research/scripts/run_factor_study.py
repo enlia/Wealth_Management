@@ -18,6 +18,7 @@ import time
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -38,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n", type=int, default=200,
                    help="股票池大小上限；0 或 --all 表示全市场")
     p.add_argument("--all", action="store_true", help="全市场")
+    p.add_argument("--seed", type=int, default=20240101,
+                   help="抽样随机种子（--n 模式下抽样股票池用）")
     p.add_argument("--factors", default="mom60_skip20,rev5,vol60",
                    help=f"逗号分隔的因子名，可用: {','.join(sorted(FACTORY))}")
     p.add_argument("--start", default=None)
@@ -93,13 +96,22 @@ def main() -> int:
     print(f"区间 {cfg.start_date} ~ {cfg.end_date}   分组 {cfg.quantiles}   "
           f"前瞻期 {cfg.periods}   成本往返 {DEFAULT_COST.round_trip*100:.1f}bp")
     print(f"子区间检验: {list(cfg.sub_periods)}")
-    print(f"股票池: {'全市场 A 股' if full else f'前 {args.n} 只 A 股（按代码排序）'}")
+    print(f"股票池: {'全市场 A 股' if full else f'随机 {args.n} 只 A 股（seed={args.seed}）'}")
 
     # ── 1. 载入 ──────────────────────────────────────────────
     t0 = time.perf_counter()
     codes = [c for c in all_codes() if is_a_share(c)]
     if not full:
-        codes = codes[: args.n]
+        # 🔴 必须**随机抽样**，不能取前 N 个（2026-10-06 实测踩坑）。
+        #   all_codes() 按代码排序，而 bj<sh<sz —— 取前 60 只得到的是
+        #   **清一色北交所**新股，股票池构建时「上市满1 年」一项全部淘汰，
+        #   最终股票池 0 只。表现出来是「面板为空」，根因却是抽样方式。
+        #   这与 P16（分组排名方向）是同一类错误：代码能跑、有输出、
+        #   但样本不是你想研究的那个样本。
+        rng = np.random.default_rng(args.seed)
+        if len(codes) > args.n:
+            codes = sorted(rng.choice(codes, size=args.n, replace=False))
+        print(f"\n抽样：{args.n} 只（seed={args.seed}，随机）")
     print(f"\n[1/5] 读取 {len(codes):,} 只标的长表 …")
     long = load_long(codes, start=cfg.start_date, end=cfg.end_date, adjusted=True)
     print(f"      {len(long):,} 行，耗时 {time.perf_counter()-t0:.1f}s")
@@ -223,7 +235,7 @@ def main() -> int:
             "数据版本": ver["version"],
             "打戳时间": ver["stamped_at"],
             "因子": args.factors,
-            "股票池": "全市场" if args.all else f"{args.n} 只",
+            "股票池": "全市场" if args.all else f"随机 {args.n} 只 (seed={args.seed})",
             "区间": f"{args.start or '默认'} ~ {args.end or '默认'}",
         }
         (out_dir / "run_meta.json").write_text(

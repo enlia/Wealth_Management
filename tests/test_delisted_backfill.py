@@ -252,3 +252,63 @@ class TestBinsQuantileLabels:
                    is not None}
         assert covered == set(labels), \
             f"换手率未覆盖全部分位：缺 {set(labels) - covered}"
+
+
+class TestUniverseListDays:
+    """「上市满 N 天」判据不能拿**窗口内序号**去比 N。
+
+    🔴 2026-10-06 实测：原实现是
+        d.groupby("code")["date"].rank(method="dense") > min_list_days
+    这个序号的上界就是**窗口内交易日总数**。研究窗口短于 250 个交易日时
+    （2024 年全年只有 242 天），**每只股票都被淘汰** → 股票池 0 只。
+    表现出来是「close_adj 面板为空」，报错却指向并库，把排查方向带偏。
+
+    正确判据：**上市日早于窗口起点 → 每天都已满 N 天，直接合格。**
+    """
+
+    @staticmethod
+    def _long(n_days: int, start: str = "2024-01-02") -> pd.DataFrame:
+        days = pd.bdate_range(start, periods=n_days)
+        return pd.DataFrame({
+            "code": ["sh600519"] * n_days,
+            "date": days,
+            "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+            "amount": 1e8, "vol": 1e6,
+        })
+
+    def _info(self, list_date: int | None = 20010827) -> pd.DataFrame:
+        return pd.DataFrame({"code": ["sh600519"],
+                             "name": ["贵州茅台"],
+                             "list_date": [float(list_date)]})
+
+    def test_短窗口不应把老股票全淘汰(self) -> None:
+        """窗口 242 天 < min_list_days=250，老股票必须保留。"""
+        from factor_lab.config import ResearchConfig
+        from factor_lab.data.universe import build_universe
+
+        long = self._long(242)
+        out = build_universe(long, ResearchConfig(), info=self._info(),
+                             verbose=False)
+        assert len(out) == 242, f"老股票被误判为新股，剩 {len(out)}/242 行"
+
+    def test_上市日在窗口内的新股应被淘汰(self) -> None:
+        """上市日落在窗口内且不满 250 天 → 必须淘汰（这是本过滤的本意）。"""
+        from factor_lab.config import ResearchConfig
+        from factor_lab.data.universe import build_universe
+
+        long = self._long(242)
+        # 上市日= 2024-03-01（窗口内第 21 个交易日）
+        out = build_universe(long, ResearchConfig(),
+                             info=self._info(list_date=20240301), verbose=False)
+        # 满 250 天的行不存在 → 全部淘汰
+        assert len(out) == 0, f"次新股未被淘汰，剩 {len(out)} 行"
+
+    def test_上市满250天的新股应保留(self) -> None:
+        """上市日 2024-01-02，第 251 个交易日起应合格。"""
+        from factor_lab.config import ResearchConfig
+        from factor_lab.data.universe import build_universe
+
+        long = self._long(300)
+        out = build_universe(long, ResearchConfig(),
+                             info=self._info(list_date=20240102), verbose=False)
+        assert len(out) == 50, f"应保留 300−250=50 行，实际 {len(out)}"
