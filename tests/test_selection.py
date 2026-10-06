@@ -263,7 +263,6 @@ class TestWarmupWindow:
         p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
         assert p["rev5"].notna().sum().sum() > 0, (
             "样本在 2019 年必须实际有行情行 —— 否则是抽样抽空了，测试在空转")
-        p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
         cov250 = float(p["pos250"].notna().mean().mean())
         cov5 = float(p["rev5"].notna().mean().mean())
         assert cov250 > 0, (
