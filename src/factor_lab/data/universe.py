@@ -39,7 +39,64 @@ def build_universe(
 
     m2 = len(d)
     if cfg.exclude_new:
-        d = d[d.groupby("code")["date"].rank(method="dense") > cfg.min_list_days]
+        # 🔴 判据必须是「**上市首日至今**的交易日数」，不是「**窗口内**的序号」。
+        #
+        # 2026-10-06 实测踩坑：原实现是
+        #     d.groupby("code")["date"].rank(method="dense") > cfg.min_list_days
+        # 这个序号的**上界就是窗口内的交易日总数**。于是只要研究窗口
+        # 短于 250 个交易日（2024 年全年只有 242 天），
+        # **每一只股票都会被淘汰** —— 股票池直接变成 0 只。
+        # 表现为「close_adj 面板为空」，报错信息却指向并库，
+        # 把排查方向带偏（第一次就这么被带偏过）。
+        #
+        # 正确口径：以 ``stock_info.list_date``（真实上市日）为基准。
+        # 退化路径：info 缺失或该股没有 list_date 时，用「本表内首个交易日」
+        # 作为基准 —— 但这会让**窗口之前上市的股票全部被误判为新股**，
+        # 所以必须打印受影响数量，不能默默接受（P4 静默fallback）。
+        _cal = np.sort(d["date"].unique())
+        _pos = {dt: i for i, dt in enumerate(_cal)}
+        # _cal 是 numpy.datetime64，_ld 是 Timestamp，直接比较会报
+        # "TypeError: '<' not supported between int and Timestamp"，
+        # 统一成 Timestamp 再searchsorted。
+        _cal_ts = pd.DatetimeIndex(_cal)
+        base = d.groupby("code", sort=False)["date"].transform("min")
+        n_fallback = 0
+        if info is not None and "list_date" in info.columns:
+            # ⚠️ list_date 在库里是 float（缺失为 NaN），直接 astype("Int64")
+            #    会报 invalid literal for int() with base 10: '0.0'
+            _ld = info.drop_duplicates("code").set_index("code")["list_date"]
+            _ld = pd.to_numeric(_ld, errors="coerce")
+            _ld = _ld.dropna().astype("int64").astype("string")
+            _ld = pd.to_datetime(_ld, format="%Y%m%d", errors="coerce")
+            if _ld.notna().any():
+                _base_ld = d["code"].map(_ld)
+                n_fallback = int(_base_ld.isna().sum())
+                # 🔴 上市日「早于窗口起点」= 该股在窗口内**每一天**都已上市满 1 年，
+                #    直接判合格，不能拿窗口内序号去比 250 ——
+                #    窗口内序号上界就是窗口交易日数（2024 全年 242 天 < 250），
+                #    于是**每只股票都被淘汰**。本函数在这一点上栽了两次：
+                #      ① 用 rank() 窗口内序号 → 短窗口 100% 淘汰
+                #      ② 改用上市日基准但仍减 searchsorted → 同样全负数
+                #    正确判据只有一句：**上市日早于窗口起点 → 合格**。
+                _before_win = _base_ld.map(
+                    lambda x: bool(pd.notna(x) and len(_cal_ts)
+                                   and x < _cal_ts[0]))
+                _in_win = _base_ld.map(
+                    lambda x: bool(pd.notna(x) and len(_cal_ts)
+                                   and _cal_ts[0] <= x <= _cal_ts[-1]))
+                _ld_pos = _base_ld.map(
+                    lambda x: (_cal_ts.searchsorted(x) if pd.notna(x) else np.nan))
+                age = d["date"].map(_pos) - _ld_pos.where(_in_win, 0)
+                # 上市日缺失 → 退化为「表内首日」基准
+                bad = age.isna()
+                if bad.any():
+                    age[bad] = (d.loc[bad, "date"].map(_pos)
+                                - base[bad].map(_pos))
+                ok = (age >= cfg.min_list_days) | _before_win
+                d = d[ok]
+        if n_fallback:
+            print(f"  ⚠️ {n_fallback:,} 行缺 stock_info.list_date，"
+                  "上市年限按表内首日估算（若窗口早于真实上市日，会误判为新股）")
     steps.append(("上市满1年", m2, len(d)))
 
     m3 = len(d)
