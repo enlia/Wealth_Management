@@ -243,6 +243,42 @@ if data is None:
 
 **如果一次运行「看起来成功」但实际跳过了某些检查，就算违规。**
 
+### ⚠️ 写操作必须验证「实际影响行数」（2026-10-06 新增）
+
+`executemany` / `execute` **返回成功不代表写进去了**。
+实测（SQLite 3.53.1，`bar_daily` 表，19,623 条 UPDATE）：
+
+| 写法 | 实际命中 | 是否报错 |
+|---|---|---|
+| `executemany` | **0 行** | ❌ 不报错 |
+| 逐条 `execute` | 19,623 行 | — |
+
+同参数、同连接、同一条 SQL。**`rowcount` 也是 0，不抛异常。**
+排查花了六轮：先怀疑 `date` 类型（确实是 INTEGER，但改成int 仍为 0）、
+再怀疑 `itertuples` 的 namedtuple、再怀疑 autocommit / 事务回滚 / 并发锁 ——
+全部排除，最后靠「逐条 execute 命中率 100%」反推出批量路径失效。
+
+**规则**：
+
+```python
+# ❌ 禁止：写完就当成功
+cur.executemany("UPDATE ... WHERE code=? AND date=?", rows)
+
+# ✅ 必须：逐条执行 + 统计未命中 + 写后独立验证
+miss = sum(1 for r in rows if cur.execute(sql, r).rowcount == 0)
+if miss:
+    raise RuntimeError(f"{miss} 行未命中，已中止")
+got = cur.execute("SELECT COUNT(*) ... WHERE close_adj IS NOT NULL").fetchone()[0]
+if got < 0.90 * total:
+    raise RuntimeError(f"只命中 {got}/{total}，已中止")
+```
+
+**判据**：任何 `UPDATE` / `INSERT` 之后，必须用一条独立的 `SELECT` 确认行数。
+**「没抛异常」和「rowcount > 0」都不能作为写入成功的证据。**
+
+这条与 P17（回测前必做数据审计）同源：
+**审计脚本自己也可能静默失效，所以审计结果要有第二套独立路径交叉验证。**
+
 ---
 
 ## 五、禁止非必要门禁
