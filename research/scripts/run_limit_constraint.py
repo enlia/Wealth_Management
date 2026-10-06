@@ -44,6 +44,12 @@ from factor_lab.analysis.tradability import (  # noqa: E402
     load_limit_panel,
 )
 from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+from compare_benchmarks import benchmark_annual  # noqa: E402
+from report_disclaimers import (  # noqa: E402
+    AGENTS_CALIBER,
+    agents_caliber,
+    perf_declaration,
+)
 
 OUTPUT = ROOT / "runtime" / "limit_constraint"
 LIMIT_PARQUET = ROOT / "runtime" / "tushare" / "stk_limit.parquet"
@@ -347,6 +353,19 @@ def main() -> int:
     with pd.option_context("display.width", 200):
         print(piv.to_string(float_format=lambda x: f"{x:>9.4f}"))
 
+    # ── 多基准与超额（P14 ③ / Q18：不得只报单一基准）──
+    bench = benchmark_annual(start, end)
+    for name, b in bench.items():
+        df[f"{name}超额"] = df["年化"] - b
+    print("\n基准年化：" + "   ".join(
+        f"{k} {v:.2%}" if np.isfinite(v) else f"{k} N/A（缺数据）"
+        for k, v in bench.items()))
+    ex_cols = [c for c in df.columns if c.endswith("超额")]
+    with pd.option_context("display.width", 200):
+        print(df.pivot_table(index="因子", columns="口径",
+                             values=ex_cols).to_string(
+                                 float_format=lambda x: f"{x:>9.4f}"))
+
     OUTPUT.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUTPUT / "ab_compare.csv", index=False, encoding="utf-8-sig")
     try:
@@ -356,12 +375,20 @@ def main() -> int:
             {"数据版本": ver["version"], "打戳": ver["stamped_at"],
              "区间": f"{start}~{end}", "因子": factors,
              "成本": {"买入": cost.buy, "卖出": cost.sell},
-             "股票池": "全市场" if args.all else f"随机 {len(codes)} 只"},
+             "股票池": "全市场" if args.all else f"随机 {len(codes)} 只",
+             "口径声明": list(AGENTS_CALIBER)},
             ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n数据版本: {ver['version']}")
     except Exception as e:                                   # noqa: BLE001
         print(f"⚠ 版本记录失败: {e}")
 
+    print()
+    print(perf_declaration(
+        portfolio="单边多头组合（非多空）—— A股散户无法做空，实盘只有多头部分",
+        cost_desc=cost.describe(),
+        benchmarks="等权全市场 + 沪深300（Q18：不得只报单一基准）"))
+    print()
+    print(agents_caliber())
     print("\n提示：以上为统计检验，不构成投资建议。")
     return 0
 

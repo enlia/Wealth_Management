@@ -125,6 +125,37 @@ def annual_return_from_r(r: pd.Series) -> float:
     return nav ** (1 / _year_span(s.index)) - 1
 
 
+def benchmark_annual(start: str, end: str) -> dict[str, float]:
+    """区间内基准年化收益：**等权全市场 + 沪深300**。
+
+    ⚠️ 本项目判据（DATA_QUALITY Q18）：报超额不得只报单一基准 ——
+       实测基准间单年可差 31pp，只报一个的「跑赢/跑输」结论换个基准就反转。
+       故一次给两个，让读者自己判断。
+
+    ⚠️ 两个基准的**年化口径必须与策略侧一致**（`_year_span` 自然日），
+       否则「超额 = 策略 − 基准」直接偏 0.5pp/年（见 `annual_return` 注释）。
+
+    ⚠️ 沪深300 依赖 `runtime/tushare/index_daily.parquet`（本地产物，不进 git）：
+       缺文件时**显式打印跳过原因**并返回 NaN —— 不静默当 0，
+       也不悄悄换成别的基准（禁止静默 fallback）。
+    """
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        out = {"等权全市场":
+               annual_return_from_r(equal_weight_bench(con, start, end))}
+    finally:
+        con.close()
+    if not INDEX_DAILY.exists():
+        print(f"  ⚠ 跳过沪深300 基准：缺 {INDEX_DAILY}（本地产物不进 git）")
+        out["沪深300"] = float("nan")
+        return out
+    idx = load_index_panel(["000300.SH"])
+    s = idx.loc[(idx.index >= pd.Timestamp(start)) &
+                (idx.index <= pd.Timestamp(end)), "000300.SH"]
+    out["沪深300"] = annual_return(s) if len(s.dropna()) > 2 else float("nan")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="多基准对比")
     ap.add_argument("--start", default="20190101")
