@@ -1,44 +1,13 @@
-"""Tushare 2000 积分全量数据补全：按「性价比」排序，分批落盘 + 断点续跑。
+"""Tushare 2000 积分全量数据下载：按「性价比」排序，分批落盘 + 断点续跑。
 
-实测结论（2026-10-05，probe_all_interfaces.py 探测 27 个接口）
------------------------------------------------------------
-  可用 23 / 27。不可用 4 个：suspend_d（停复牌）、top_list（龙虎榜）、
-  bak_daily、cyq_perf（筹码分布）。
-
-  意外收获：文档标注高门槛的 6 个接口实际都能用
-  forecast（业绩预告）、express（业绩快报）、fina_mainbz（主营构成）、
-  report_rc（研报评级）、stk_holdernumber（股东人数）、pledge_stat（股权质押）。
-
-关键优化：按「交易日」批量拉，而非按「股票」逐只拉
------------------------------------------------------------
-  实测单日全市场 daily_basic 返回 5,561 行 / 0.4 秒。
-  按交易日拉 2,634 天 = 2,634 次请求；按股票拉 5,591 只 = 5,591 次。
-  耗时差2 倍以上，且行数一样。
-
-  ⚠️ 但财务类接口（fina_indicator / income / balancesheet / cashflow）
-     只能按股票或报告期拉 —— 实测按报告期一次返回 5,591 行，
-     80 个报告期 = 80 次请求，这反而比逐只快 70倍。
-
-优先级排序（按「对因子检验的边际价值 / 耗时」）
--------------------------------------------------
-  P0 daily_basic     日频估值/市值/换手   18 min  1,448万行  ← 最高价值
-  P0 fina_indicator  财务指标全历史        1 min5万行
-  P0 income          利润表              2 min
-  P0 balancesheet    资产负债表            2 min
-  P0 cashflow        现金流量表            2 min
-  P1 stk_limit       涨跌停价格           11 min  1,475万行
-  P1 moneyflow       资金流向             24 min  1,448万行
-  P1 index_daily     指数日线7 min
-  P1 index_weight    指数成分权重           1 min
-  P2 trade_cal       交易日历             <1 min
-  P2 其余（forecast / express / fina_mainbz / report_rc /
-     stk_holdernumber / pledge_stat / namechange / hs_const）  合计 < 5 min
+任务表已抽到 ``tushare_tasks.py``（本文件原本 443 行，触及 500 行强制拆分区）。
+接口可用性实测、踩坑记录、优先级依据都在那个模块，本文件只管执行。
 
 用法
 ----
-  uv run python research/scripts/fetch_all_tushare.py --list       # 看清单
-  uv run python research/scripts/fetch_all_tushare.py --task p0    # 只拉 P0
-  uv run python research/scripts/fetch_all_tushare.py              # 全拉
+  uv run python research/scripts/fetch_all_tushare.py --list# 看清单
+  uv run python research/scripts/fetch_all_tushare.py --prio P1     # 只拉 P1
+  uv run python research/scripts/fetch_all_tushare.py --task moneyflow
   uv run python research/scripts/fetch_all_tushare.py --dry-run    # 只估时间
 """
 from __future__ import annotations
@@ -53,100 +22,17 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research" / "scripts"))
-from factor_lab.config import DB_PATH, env_get, is_a_share  # noqa: E402
 from fetch_tushare import call  # noqa: E402
+from tushare_paging import fetch_paged  # noqa: E402
+from tushare_tasks import END, INDEXES, START, TASKS  # noqa: E402
+
+from factor_lab.config import DB_PATH, env_get, is_a_share  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "runtime" / "tushare"
-START, END = "20151201", "20260930"
-RATE = 180          # 次/分钟，留10% 余量
+RATE = 180# 次/分钟，留 10% 余量
 
 
-# ── 任务定义 ────────────────────────────────────────────────────
-# kind: "by_date"  按交易日逐日  |  "by_period" 按报告期 |  "once" 一次拉完
-TASKS: dict[str, dict] = {
-    # ── P0 ──
-    "daily_basic": {
-        "kind": "by_date", "p": "P0", "desc": "每日指标(PE/PB/市值/换手/换手率)",
-        "est_min": 18, "note": "本机只有单期快照，这个是日频历史，量级差异最大",
-    },
-    "fina_indicator": {
-        "kind": "by_stock", "p": "P0", "desc": "财务指标(ROE/毛利率/负债率/增长率)",
-        "est_min": 50, "note": "盈利能力/成长/质量因子的核心输入",
-    },
-    "income": {
-        "kind": "by_stock", "p": "P0", "desc": "利润表(营收/净利/毛利)",
-        "est_min": 48, "note": "构建利润质量因子：净利与经营现金流的背离",
-    },
-    "balancesheet": {
-        "kind": "by_stock", "p": "P0", "desc": "资产负债表(资产/负债/净资产)",
-        "est_min": 50, "note": "杠杆因子、偿债能力因子",
-    },
-    "cashflow": {
-        "kind": "by_stock", "p": "P0", "desc": "现金流量表(经营/投资/筹资现金流)",
-        "est_min": 49, "note": "现金流质量因子 —— 比净利润更难操纵",
-    },
-    # ── P1 ──
-    "stk_limit": {
-        "kind": "by_date", "p": "P1", "desc": "涨跌停价格",
-        "est_min": 11, "note": "涨跌停因子必需；可精确判断「是否封板」",
-    },
-    "moneyflow": {
-        "kind": "by_date", "p": "P1", "desc": "资金流向(大单/超大单净额)",
-        "est_min": 24, "note": "资金流因子；注意这是交易行为数据，非基本面",
-    },
-    "index_daily": {
-        "kind": "by_date", "p": "P1", "desc": "指数日线",
-        "est_min": 7, "note": "基准净值 —— 算超额收益必需",
-    },
-    "index_weight": {
-        "kind": "by_period_month", "p": "P1", "desc": "指数成分权重",
-        "est_min": 1, "note": "沪深300/中证500 成分与权重",
-    },
-    # ── P2 ──
-    "trade_cal": {
-        "kind": "once", "p": "P2", "params": {"start_date": START, "end_date": END},
-        "desc": "交易日历",
-        "est_min": 0.1, "note": "所有时间对齐的基础",
-    },
-    "forecast": {
-        "kind": "by_stock", "p": "P2", "desc": "业绩预告",
-        "est_min": 40, "note": "预告净利润增速 —— 事件因子",
-    },
-    "express": {
-        "kind": "by_period", "p": "P2", "desc": "业绩快报",
-        "est_min": 2, "note": "快报与正式财报的差异本身就是信号",
-    },
-    "fina_mainbz": {
-        "kind": "by_stock", "p": "P2", "desc": "主营构成",
-        "est_min": 50, "note": "业务多元化程度；单主业公司更易形成能力预期",
-    },
-    "report_rc": {
-        "kind": "by_period_month", "p": "P2",
-        "params": {"index_code": None},
-        "desc": "研报评级(全市场按月)",
-        "est_min": 6,
-        "note": "卖方共识因子；注意可能反向 —— 过度拥挤的预期已被price in",
-    },
-    "stk_holdernumber": {
-        "kind": "by_period", "p": "P2", "desc": "股东人数",
-        "est_min": 2, "note": "股东人数变化 = 筹码集中度，散户化程度",
-    },
-    "pledge_stat": {
-        "kind": "by_period", "p": "P2", "desc": "股权质押",
-        "est_min": 2, "note": "质押率 = 股东风险偏好，高质押股易暴跌",
-    },
-}
-
-# 指数列表（index_daily / index_weight 需要）
-INDEXES = [
-    "000300.SH",   # 沪深300
-    "000905.SH",   # 中证500
-    "000852.SH",   # 中证1000
-    "399006.SZ",   # 创业板指
-    "000001.SH",   # 上证指数
-    "399001.SZ",   # 深证成指
-]
 
 
 def trading_days(token: str) -> list[str]:
@@ -221,21 +107,71 @@ class Limiter:
         self.last = time.perf_counter()
 
 
+MANIFEST = OUT / "_download_manifest.json"
+
+# Tushare 单页上限。实测：
+#   namechange 首页 10,000（上限 10,000）    index_basic 首页 8,000（实际 8,000 满页）
+#   repurchase/pledge_detail 首页 2,000/1,500
+# ⚠️ **必须翻页**，否则拿到的是首页截断，数据是残缺的。
+#   实测 new_share offset=4000 只剩 340 行 —— 说明 4,340 就是全量。
+PAGE_SIZE = 2000
+
+
+def load_manifest() -> dict:
+    """读下载账本：记录每个任务是否**真正完成**。
+
+    ⚠️ 不能用「文件存在」判断完成 ——
+    中断时 `run_task` 会写 `{tag}_partial.parquet`，
+    若下次跑只判断 `{tag}.parquet` 存在，会把半成品当完成。
+    """
+    if not MANIFEST.exists():
+        return {}
+    try:
+        return json.loads(MANIFEST.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        # 账本损坏必须显式报错，不能静默当成「全部重跑」
+        raise RuntimeError(
+            f"下载账本损坏：{MANIFEST}\n"
+            f"  解决：删除该文件后重跑（会重新下载全部任务）"
+        ) from None
+
+
+def mark_done(name: str, rows: int, minutes: float) -> None:
+    m = load_manifest()
+    m[name] = {"rows": rows, "minutes": round(minutes, 1),
+               "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    MANIFEST.write_text(json.dumps(m, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+
+
 def run_task(name: str, spec: dict, token: str, lim: Limiter,
              dry: bool) -> dict:
     """执行单个任务的全量下载。"""
     tag = name
     final = OUT / f"{tag}.parquet"
-    if final.exists():
-        d = len(pd.read_parquet(final, columns=[list(pd.read_parquet(final).columns)[0]]))
+    manifest = load_manifest()
+
+    if name in manifest and final.exists():
+        d = manifest[name]["rows"]
         print(f"  ✓ {name:<16} 已完成，跳过（{d:,} 行）")
+        return {"task": name, "skipped": True, "rows": d}
+
+    if final.exists() and name not in manifest:
+        print(f"  ⚠ {name:<16} 存在 {final.name} 但账本无记录"
+              f"（可能是早期版本下载的，按已完成处理）")
+        try:
+            d = len(pd.read_parquet(final))
+        except Exception:                                      # noqa: BLE001
+            d = 0
+        mark_done(name, d, 0.0)
         return {"task": name, "skipped": True, "rows": d}
 
     kind = spec["kind"]
     print(f"\n  → {name}  {spec['desc']}")
     print(f"    {spec['note']}")
     if dry:
-        print(f"    [dry-run] 预估{spec['est_min']} 分钟")
+        print(f"    [dry-run] 预估 {spec['est_min']} 分钟")
         return {"task": name, "dry": True}
 
     t0 = time.perf_counter()
@@ -244,8 +180,7 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
 
     try:
         if kind == "once":
-            lim.wait()
-            parts.append(call(token, name, spec.get("params", {})))
+            parts.append(fetch_paged(token, name, spec.get("params", {}), lim.wait))
 
         elif kind == "by_date":
             days = trading_days(token)
@@ -253,7 +188,7 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
             for i, d in enumerate(days, 1):
                 lim.wait()
                 try:
-                    df = call(token, name, {"trade_date": d}, retry=2)
+                    df = fetch_paged(token, name, {"trade_date": d}, lim.wait, label=d)
                     if len(df):
                         parts.append(df)
                 except Exception:                                # noqa: BLE001
@@ -308,7 +243,11 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
                 if len(df):
                     save(df, tag)
                     el = (time.perf_counter() - t0) / 60
+                    mark_done(name, len(df), el)
                     print(f"    ✓ {len(df):,} 行  用时 {el:.1f} 分钟")
+                else:
+                    print(f"    ✗ {len(ms)} 个月全部返回 0 行 —— "
+                          f"参数可能已失效，需重新核实接口文档")
                 return {"task": name, "rows": len(df)}
 
             idxs = INDEXES
@@ -326,6 +265,30 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
                         fail += 1
                 if i % 30 == 0 or i == len(ms):
                     print(f"      {i:>3}/{len(ms)} 月  {sum(len(p) for p in parts):>8,} 行")
+
+        elif kind == "by_year":
+            # 按自然年分段拉。用于数据量超过翻页上限的接口：
+            # 实测 disclosure_date 无参数翻页 60 页只拿到 12 万行，
+            # 数据停在 2016-04，近 10 年全缺 —— 分段才是可靠做法。
+            y0, y1 = int(START[:4]), int(END[:4])
+            years = list(range(y0, y1 + 1))
+            print(f"    {len(years)} 个自然年（{y0}~{y1}），每年 1 次请求+翻页")
+            for i, y in enumerate(years, 1):
+                lim.wait()
+                try:
+                    df = fetch_paged(token, name,
+                                     {"start_date": f"{y}0101",
+                                      "end_date": f"{y}1231"},
+                                     lim.wait, label=str(y))
+                    if len(df):
+                        parts.append(df)
+                except Exception as e:                              # noqa: BLE001
+                    fail += 1
+                    print(f"      {y} 失败：{str(e)[:80]}")
+                if i % 3 == 0 or i == len(years):
+                    print(f"      {i:>3}/{len(years)} 年  "
+                          f"{sum(len(p) for p in parts):>9,} 行  "
+                          f"{(time.perf_counter() - t0)/60:.1f}m")
 
         elif kind == "by_stock":
             codes = a_share_codes()
@@ -355,15 +318,34 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
         return {"task": name, "failed": True}
 
     df = pd.concat(parts, ignore_index=True)
-    # 财务类接口同报告期可能多次覆盖，去重后保存
+    # 财务类接口同报告期可能多次覆盖，去重后保存。
+    # ⚠️ 去重键必须包含「区分不同实体的字段」：
+    #   index_weight 按 trade_date 去重会丢掉同一天其它指数的成分
+    #   （实测沪深300 与中证500 权重同日返回，不带 index_code 会被合并）。
     before = len(df)
     if kind in ("by_period", "by_period_month") and len(df.columns) > 2:
-        keys = [c for c in ("ts_code", "period", "end_date", "index_code", "trade_date")
-                if c in df.columns]
+        # 从最具体到最宽泛，逐个补齐可用键
+        keys: list[str] = []
+        for cand in ("ts_code", "index_code", "con_code", "holder_name",
+                     "period", "end_date", "ann_date", "month", "trade_date"):
+            if cand in df.columns:
+                keys.append(cand)
+        # 候选键按「区分度从高到低」排列，逐个加入直到行唯一。
+        # ⚠️ 不能固定用trade_date —— index_weight 同一天有多个指数的成分，
+        #   少了 index_code 会把沪深300 和中证500 合并掉（实测踩过）。
+        candidates = ["ts_code", "index_code", "con_code", "holder_name",
+                      "ann_date", "period", "end_date", "month", "trade_date"]
+        candidates = [c for c in candidates if c in df.columns]
+        keys: list[str] = []
+        for c in candidates:
+            keys.append(c)
+            if not df.duplicated(subset=keys).any():
+                break
         if keys:
             df = df.drop_duplicates(subset=keys, keep="last")
     save(df, tag)
     el = (time.perf_counter() - t0) / 60
+    mark_done(name, len(df), el)
     print(f"    ✓ {len(df):,} 行（去重前 {before:,}）  用时 {el:.1f} 分钟"
           f"{f'  失败 {fail} 次' if fail else ''}")
     return {"task": name, "rows": len(df), "minutes": round(el, 1), "fail": fail}
@@ -372,30 +354,44 @@ def run_task(name: str, spec: dict, token: str, lim: Limiter,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", default=None, help="只跑某个任务名")
-    ap.add_argument("--prio", default=None, help="只跑某优先级 P0/P1/P2")
+    ap.add_argument("--prio", default=None, help="只跑某优先级 P1/P2/P3/P4")
     ap.add_argument("--list", action="store_true", help="列出任务清单")
     ap.add_argument("--dry-run", action="store_true", help="只估算不执行")
     args = ap.parse_args()
 
     if args.list:
+        from tushare_tasks import EMPTY, UNAVAILABLE
+
         print("=" * 92)
-        print("Tushare 补全任务清单（2000 积分，实测可用）")
+        print("Tushare 补全任务清单（2000 积分，2026-10-06 实测）")
         print("=" * 92)
-        print(f"{'任务':<18}{'优先级':<7}{'方式':<17}{'预估':>7}  说明")
+        print(f"{'':2}{'任务':<18}{'优先级':<7}{'方式':<17}{'预估':>7}  说明")
         print("-" * 92)
-        total = 0
-        for cur in ("P0", "P1", "P2"):
+        # ⚠️ 优先级必须从任务表动态取，不能硬编码 ("P0","P1","P2")——
+        #    实测踩过：加了 P3/P4 后这里不显示，看起来像「任务不存在」。
+        manifest = load_manifest()
+        total = 0.0
+        for cur in sorted({s["p"] for s in TASKS.values()}):
             for n, s in TASKS.items():
                 if s["p"] != cur:
                     continue
-                done = (OUT / f"{n}.parquet").exists()
+                done = n in manifest and (OUT / f"{n}.parquet").exists()
                 mark = "✓" if done else " "
                 m = s["est_min"]
-                total += m
+                if not done:
+                    total += m
                 unit = "s" if m < 1 else "m"
                 print(f"{mark} {n:<16}{s['p']:<7}{s['kind']:<17}{m:>6.1f}{unit}  {s['desc']}")
         print("-" * 92)
-        print(f"合计预估 {total:.0f} 分钟（约 {total/60:.1f} 小时）")
+        print(f"待下载预估 {total:.0f} 分钟（约 {total/60:.1f} 小时）")
+
+        print()
+        print("实测不可用（2000 积分）：")
+        for n, why in UNAVAILABLE.items():
+            print(f"  ✗ {n:<20} {why}")
+        print("接口存在但无数据：")
+        for n, why in EMPTY.items():
+            print(f"  ○ {n:<20} {why}")
         return 0
 
     token = env_get("TUSHARE_TOKEN")
