@@ -37,16 +37,21 @@ docs/02_方法与结论/03_A股量化算法全景对比.md）：
 from __future__ import annotations
 
 import argparse
+import sys
 import warnings
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from factor_lab.config import SCALING_TRADING_DAYS
+
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 200)
 
-TRADING_DAYS_PER_YEAR = 252
+TRADING_DAYS_PER_YEAR = SCALING_TRADING_DAYS  # ① 倍数换算层，唯一出处 config
 
 # ── A 股交易成本（务必按自己的实际费率调整）──────────────────────
 # 佣金万2.5（双边） + 印花税千0.5（仅卖出） + 滑点万5（双边估算）

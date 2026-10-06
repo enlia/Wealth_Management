@@ -7,9 +7,13 @@ import time
 import numpy as np
 import pandas as pd
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
 
 sys.path.insert(0, ".")
 from tdx import read_day, all_codes
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from factor_lab.config import SCALING_TRADING_DAYS
 
 CODES = all_codes()
 print(f"标的总数: {len(CODES)} | CPU 逻辑核心: {cpu_count()}")
@@ -27,7 +31,7 @@ def feat(code):
     r = np.diff(np.log(c))
     mom20 = c[-1] / c[-21] - 1
     rev5 = -(c[-1] / c[-6] - 1)
-    vol60 = r[-60:].std() * np.sqrt(244)
+    vol60 = r[-60:].std() * np.sqrt(SCALING_TRADING_DAYS)
     vratio = v[-5:].mean() / (v[-250:].mean() + 1e-9)
     return (code, mom20, rev5, vol60, vratio, c[-1], len(c))
 
