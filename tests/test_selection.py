@@ -132,5 +132,64 @@ class TestSelectWithBuffer:
         assert list(held[0]) == list(top[0][:10])
 
 
+class TestLongOnlyDataDeps:
+    """取数列必须覆盖因子声明的依赖（run_long_only.load_long_chunked）。"""
+
+    def test_取数包含成交量与成交额(self):
+        """⚠️ **实测踩过（2026-10-06）**：
+        取数硬编码了 OHLC+close_adj，而 `volratio5_60` 依赖 `vol`、
+        `amount20` 依赖 `amount` ——
+        结果 `KeyError: 'Column not found: vol'`。
+        这两个因子**从未在滚动检验里跑过**，属于静默漏测：
+        参数扫描表里看不到它们的任何痕迹，
+        不会报错，只是什么都没发生。
+
+        ⚠️ **判据必须是实跑，不是 grep 源码**：
+        我自己写错过一次 —— grep `cols = [...]` 只匹配到基础列表，
+        漏了后面的 `cols += [...]`，报了假失败。
+        诊断工具的可信度不高于被诊断代码（S12）。
+        故这里真的从库里取一小段数据，用真实列名跑因子。
+        """
+        import sqlite3
+        import numpy as np
+        import pandas as pd
+        from factor_lab.config import DB_PATH
+        from factor_lab.factors.price_volume import FACTORY, compute_factor
+
+        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(bar_daily)")}
+        con.close()
+        for c in ("vol", "amount", "close_adj"):
+            assert c in cols, f"bar_daily 缺列 {c}"
+
+        # 用真实列名构造长表，验证所有注册因子都能算
+        rng = np.random.default_rng(0)
+        n = 300
+        long = pd.DataFrame({
+            "code": np.repeat(["sh600000", "sz000001"], n // 2),
+            "date": pd.bdate_range("2023-01-02", periods=n // 2).repeat(2),
+            "open": rng.uniform(8, 12, n),
+            "high": rng.uniform(8, 12, n),
+            "low": rng.uniform(8, 12, n),
+            "close": rng.uniform(8, 12, n),
+            "close_adj": rng.uniform(8, 12, n),
+            "high_adj": rng.uniform(8, 12, n),
+            "low_adj": rng.uniform(8, 12, n),
+            "vol": rng.uniform(1e5, 1e6, n),
+            "amount": rng.uniform(1e6, 1e7, n),
+        })
+        failed = []
+        for name in FACTORY:
+            try:
+                s = compute_factor(name, long)
+                if s is None or s.empty:
+                    failed.append(f"{name}: 返回空")
+            except Exception as e:                               # noqa: BLE001
+                failed.append(f"{name}: {type(e).__name__} {e}")
+        assert not failed, (
+            f"因子无法计算: {failed}\n"
+            f"  ⚠ 这类失败在批量跑时表现为「跑到该因子就崩」，"
+            f"  容易被误认为因子本身有问题，实际是取数缺依赖列。")
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

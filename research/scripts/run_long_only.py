@@ -96,9 +96,17 @@ def load_long_chunked(codes: list[str], start: str, end: str,
         hi = min(ye, end[:8])
         parts = []
         # 分批取代码，避免单条 SQL 的 IN 列表过长
+        # ⚠️ **列必须按因子声明的依赖取**，不能只取 OHLC。
+        #   实测踩过：volratio5_60 依赖 `vol`、amount20 依赖 `amount`，
+        #   而这里硬编码了 OHLC+close_adj ——
+        #   结果 `KeyError: 'Column not found: vol'`，
+        #   两个因子**从未在滚动检验里跑过**（静默漏测）。
+        #   代价可控：多取两列约增加 15% 内存（约 18MB/百万行）。
+        cols = ["code", "date", "open", "high", "low", "close", "close_adj"]
+        cols += [c for c in ("vol", "amount") if c not in cols]
         for i in range(0, len(codes), 800):
             sub = codes[i:i + 800]
-            q = (f"SELECT code, date, open, high, low, close, close_adj "
+            q = (f"SELECT {', '.join(cols)} "
                  f"FROM bar_daily WHERE date BETWEEN ? AND ? "
                  f"AND close_adj IS NOT NULL AND code IN ({','.join('?' * len(sub))})")
             parts.append(pd.read_sql(q, con, params=[lo, hi, *sub]))
