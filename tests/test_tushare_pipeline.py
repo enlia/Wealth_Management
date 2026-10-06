@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
 from build_money_whitelist import NOT_MONEY_EXACT, NOT_MONEY_PATTERNS  # noqa: E402
 from fetch_all_tushare import dedup_by_business_key  # noqa: E402
-from merge_tushare_tables import ts_to_local  # noqa: E402
+from merge_tushare_tables import WHITELIST_FILE, ts_to_local  # noqa: E402
 from verify_tushare_full import check_one  # noqa: E402
 
 
@@ -116,12 +116,24 @@ class TestMoneyWhitelist:
         assert NOT_MONEY_PATTERNS.search("total_share")
 
     def test_白名单文件存在(self) -> None:
-        """缺失必须 raise —— 静默用空列表会让人以为「已经换算过了」。"""
+        """缺失必须 raise —— 静默用空列表会让人以为「已经换算过了」。
+
+        ⚠️ `runtime/tushare/` 是下载/推导出的**本地产物**（不进 git）：
+        整个产物目录都不存在时跳过（CI 干净环境、未跑过下载的环境）；
+        目录在、白名单却缺失 = 真缺陷，仍按原判据失败。
+        """
         from merge_tushare_tables import WHITELIST_FILE
+        if not WHITELIST_FILE.parent.exists():
+            pytest.skip(f"缺 {WHITELIST_FILE.parent}（本地产物不进 git），"
+                        "无产物环境跳过")
         assert WHITELIST_FILE.exists(), (
             f"白名单不存在：{WHITELIST_FILE}\n"
             f"  解决：uv run python research/scripts/build_money_whitelist.py")
 
+    @pytest.mark.skipif(
+        not WHITELIST_FILE.exists(),
+        reason="缺数据产物：runtime/tushare/_money_whitelist.json",
+    )
     def test_实际白名单不含比率字段(self) -> None:
         import json
 

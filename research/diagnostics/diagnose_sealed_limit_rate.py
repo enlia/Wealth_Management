@@ -66,29 +66,20 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from factor_lab.analysis.tradability import limit_masks, load_limit_panel  # noqa: E402
-from factor_lab.config import DB_PATH  # noqa: E402
+from factor_lab.config import DB_PATH, is_a_share  # noqa: E402
+
+# ⚠️ A 股判定统一走 `factor_lab.config.is_a_share`（唯一入口）。
+#   这里曾有一份本地副本，与 config 版口径不一致，实测三处分歧：
+#     ① `c.endswith("900")` 把尾号 900 的 A 股（sz000900 现代投资、
+#        sz002900 哈三联）当 B 股错剔；
+#     ② `c.startswith("bj")` 把 bj899050/bj899601 北证**指数**错纳为 A 股；
+#     ③ 只认 8 位带前缀码，`600519` 这类写法被错剔。
+#   同一判定两个入口必然漂移，故删除本地副本、改委托 config 版。
+#   反例已由 tests/test_diagnose_a_share.py 钉住。
 
 LIMIT_PARQUET = ROOT / "runtime" / "tushare" / "stk_limit.parquet"
 START, END = 20160101, 20260930
 TOL = 1e-6
-
-
-def is_a_share(c: str) -> bool:
-    """A 股普通股 —— 排除指数/ETF/可转债/B 股。
-
-    ⚠️ 不做这一步，分板块统计就是错的（见模块 docstring）。
-    """
-    c = str(c)
-    if c.startswith(("sh000", "sz399")):
-        return False                      # 指数：永远没有涨跌停价
-    if c[:5] in ("sh510", "sh511", "sh512", "sh513", "sh515",
-                 "sh516", "sh517", "sh518", "sh588", "sz159"):
-        return False                      # ETF / 基金
-    if c.startswith(("sh11", "sh12")):
-        return False                      # 可转债
-    if c.endswith("900"):
-        return False                      # B 股
-    return c.startswith(("sh60", "sh68", "sz00", "sz30", "bj"))
 
 
 def board_of(c: str) -> str | None:
