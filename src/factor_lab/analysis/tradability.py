@@ -212,9 +212,34 @@ def coverage_report(close: pd.DataFrame, up: pd.DataFrame,
              f"{close.shape[1]:,} 只）"]
     lines.append(f"  整体覆盖率up {up2.notna().to_numpy().mean():.2%}"
                  f" / close {close.notna().to_numpy().mean():.2%}")
+    # ⚠️⚠️ **零覆盖列必须单独报出来，不能混进分板块统计**（2026-10-06 实测）：
+    #   `bar_daily` 不只有 A 股，还有指数（sh000001、sh000300…）。
+    #   指数**永远没有涨跌停价**，而本函数按 `startswith('sh')` 分组——
+    #   2,862 列指数被当成「沪主板」，把沪主板涨停价覆盖率
+    #   从97.8% 拉低到 **52.2%**，看起来像「数据烂了一半」。
+    #   实际是口径错误：**分母里混了不该有的东西**。
+    #   ⚠️ 与 P16（分组排名方向）同类：代码能跑、有输出，
+    #      但统计的对象不是你要研究的对象。
+    #
+    #   ⚠️ **但零覆盖列不能从报告里删掉**（review 抓出）：
+    #   北交所 `stk_limit` 覆盖不全，零覆盖列**恰恰是最该报警的信号** ——
+    #   删掉它这份报告就变成「一切正常」，正好丢掉它的存在意义。
+    #   ⇒ 折中：**分板块统计排除零覆盖列**，同时**单独报出零覆盖列数**
+    #     与占比，让「指数混入」与「北交所缺数据」两种原因可区分。
+    zero_cols = [c for c in per_col.index if float(per_col[c]) <= 0]
+    lines.append(f"  零涨跌停价列 {len(zero_cols):,}/{close.shape[1]:,} "
+                 f"({len(zero_cols)/max(close.shape[1],1):.1%})"
+                 f" —— 已从下方分板块统计中排除"
+                 f"（成因：指数/基金混入，或该板块 stk_limit 未覆盖）")
+    if zero_cols:
+        lines.append(f"    样例: {list(zero_cols[:3])}")
+    ok_cols = [c for c in per_col.index if float(per_col[c]) > 0]
     for pre, name in (("sh", "沪主板"), ("sz", "深市"), ("bj", "北交所")):
-        cols = [c for c in per_col.index if str(c).startswith(pre)]
+        cols = [c for c in ok_cols if str(c).startswith(pre)]
         if not cols:
+            lines.append(f"  {name:<6} {0:>5} 只  涨停价覆盖率  0.00%  "
+                         f"真封涨停率  0.000%  "
+                         f"⚠ 该板块全部零覆盖，stk_limit 未覆盖")
             continue
         sub = per_col[cols]
         sub_true = true_limit[cols].to_numpy().mean()
