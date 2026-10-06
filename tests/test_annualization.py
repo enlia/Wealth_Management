@@ -1,18 +1,24 @@
-"""日频 → 年频折算按 **252 交易日惯例**（PITFALLS P10 公式口径）。
+"""年化换算的两种语义各自钉死（裁决 v2 语义分层）。
 
 ## 口径来源
 
-规范真源 `.github/standards/PITFALLS.md` P10 钉死公式：
-`gross = spread * (252 / periods[0])` —— 全规范与既有报告数字均为 252 口径。
-`engine.TRADING_DAYS` 是全仓该常数的唯一出处。
-⚠️ 若改 243（A股实际年均交易日）属**全项目口径变更**，
-   需单独立项重刷历史数字的可比性；本文件即该决议的守门人。
+- **倍数换算**（把每期/每日比率放大到年频，×N 或 ×√N）= **252**：
+  规范真源 `.github/standards/PITFALLS.md` P10 钉死公式
+  `gross = spread * (252 / periods[0])`。
+- **时长换算**（把交易日数折成年数，数据横跨几年）= **243**：
+  A股实测算式 2,611 交易日 ÷ 10.75 历年 = 242.9 ≈ 243（年均交易日）。
+
+两者并存系**语义不同**；`engine.SCALING_TRADING_DAYS` 与
+`engine.YEAR_TRADING_DAYS` 是各自语义在全仓的唯一出处。
+⚠️ 若改统一约定属**全项目口径变更**，需单独立项重刷历史数字可比性 ——
+   本文件即该决议的守门人。
 
 ## 判据
 
-按 UNITS「找已知真值反推」：给定持仓/权重/收益，年化波动与平均年成本的
+按 UNITS「找已知真值反推」：给定持仓/权重/收益/索引长度，
+倍数放大的期望值按 252、年跨越时长的期望值按 243，
 算式逐步写在用例注释里（可复核、可重算）；
-另有反向断言钉住「退回 243 必须失败」、「常数被改必须失败」。
+另有常数各自钉死与「两种语义互换必须失败」的反向断言。
 """
 from __future__ import annotations
 
@@ -28,20 +34,26 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from factor_lab.analysis.costs import CostModel  # noqa: E402
-from factor_lab.analysis.engine import TRADING_DAYS, simulate_matrix  # noqa: E402
+from factor_lab.analysis.engine import (  # noqa: E402
+    SCALING_TRADING_DAYS,
+    YEAR_TRADING_DAYS,
+    _year_span,
+    simulate_matrix,
+)
 from factor_lab.analysis.spec import PortfolioSpec  # noqa: E402
 
 DATES = pd.date_range("2023-01-02", periods=3, freq="B")
 
 
-class TestDailyToYearScale:
-    def test_年化波动按252交易日折算(self):
+class Test倍数换算252:
+    def test_年化波动倍数放大按252(self):
         """日收益 [0.01, 0, 0] 的已知真值（算式可复核）：
 
         均值        = 0.01/3                             ≈ 0.0033333
         Σ(x−mean)²  = 0.0066667² + 2×0.0033333²          = 6.66667e-5
         std(ddof=1) = √(6.66667e-5 / 2)                  ≈ 0.0057735
         年化波动     = std × √252 ≈ 0.0057735 × 15.87451  ≈ 0.091652
+        （√252 是倍数放大，不是时长折算 —— 时长口径才是 243）
         """
         fwd = pd.DataFrame({"sh600000": [0.01, 0.0, 0.0]}, index=DATES)
         res = simulate_matrix(
@@ -53,10 +65,10 @@ class TestDailyToYearScale:
             daily_std * math.sqrt(252), rel=1e-9)
         assert res["年化波动"] != pytest.approx(
             daily_std * math.sqrt(243), rel=1e-3), (
-            "折算被改成 243 —— 全项目口径是 252（PITFALLS P10 公式口径），"
-            "改 243 需单独立项重刷历史数字可比性，不能悄悄改")
+            "倍数放大被按 243 折算 —— 倍数口径是 252（PITFALLS P10 公式），"
+            "243 是时长口径，两种语义不能混")
 
-    def test_平均年成本按252交易日折算(self):
+    def test_平均年成本倍数放大按252(self):
         """一次调仓换手 L1=2 的已知真值（算式可复核）：
 
         CostModel 默认：commission=0.00025、transfer_fee=0.00001、
@@ -65,6 +77,7 @@ class TestDailyToYearScale:
         持仓列 0→1（卖 1 买 1）L1 = 2 ⇒ 日成本 = 2×0.00151 = 0.00302
         3 行均值 = 0.00302/3           ≈ 0.00100667
         平均年成本 = 0.00100667 × 252  ≈ 0.255680
+        （×252 是倍数放大，不是时长折算）
         """
         fwd = pd.DataFrame({"sh600000": [0.0, 0.0, 0.0],
                             "sz000001": [0.0, 0.0, 0.0]}, index=DATES)
@@ -78,16 +91,45 @@ class TestDailyToYearScale:
             sum(per_day) / 3 * 252, rel=1e-9)
         assert res["平均年成本"] != pytest.approx(
             sum(per_day) / 3 * 243, rel=1e-3), (
-            "折算被改成 243 —— 全项目口径是 252（PITFALLS P10 公式口径），"
-            "改 243 需单独立项重刷历史数字可比性，不能悄悄改")
+            "倍数放大被按 243 折算 —— 倍数口径是 252（PITFALLS P10 公式），"
+            "243 是时长口径，两种语义不能混")
 
-    def test_折算常数钉死252并与P10公式口径一致(self):
-        """常数 = 252，与 PITFALLS P10 公式 `gross = spread * (252 / periods[0])`
-        的 252 同一口径；全仓该常数的唯一出处是 engine.TRADING_DAYS。"""
-        assert TRADING_DAYS == 252, (
-            f"TRADING_DAYS={TRADING_DAYS} —— 全项目年化口径是 252"
-            "（PITFALLS P10 公式口径），"
-            "改口径需单独立项并重刷历史数字可比性")
+
+class Test时长换算243:
+    def test_年数时长按年均243交易日折算(self):
+        """交易日数 → 年数的已知真值（算式可复核）：
+
+        243 个位置索引  = 243/243  = 1.000 年
+        2611 个位置索引 = 2611/243 ≈ 10.745 年
+          （A股实测：2,611 交易日 ≈ 10.75 历年，2611÷10.75 = 242.9 ≈ 243，
+            即常量的出处算式）
+        """
+        assert _year_span(list(range(243))) == pytest.approx(243 / 243,
+                                                             rel=1e-9)
+        assert _year_span(list(range(2611))) == pytest.approx(2611 / 243,
+                                                              rel=1e-9)
+        assert _year_span(list(range(243))) != pytest.approx(243 / 252,
+                                                             rel=1e-3), (
+            "时长折算被按 252 计 —— 时长口径是 243（A股年均交易日），"
+            "252 是倍数口径，两种语义不能混")
+
+
+class Test换算常数各自钉死:
+    def test_倍数换算常数钉死252并与P10公式口径一致(self):
+        """倍数换算 = 252，算式出处：PITFALLS P10
+        `gross = spread * (252 / periods[0])` —— 公式里的 252 即倍数放大口径。"""
+        assert SCALING_TRADING_DAYS == 252, (
+            f"SCALING_TRADING_DAYS={SCALING_TRADING_DAYS} —— 倍数换算口径是 "
+            "252（PITFALLS P10 公式口径），改口径属全项目口径变更，"
+            "需单独立项重刷历史数字可比性")
+
+    def test_时长换算常数钉死243并与A股实测一致(self):
+        """时长换算 = 243，算式出处：A股实测 2,611 交易日 ÷ 10.75 历年
+        = 242.9 ≈ 243（年均交易日）。"""
+        assert YEAR_TRADING_DAYS == 243, (
+            f"YEAR_TRADING_DAYS={YEAR_TRADING_DAYS} —— 时长换算口径是 243"
+            "（A股实测年均交易日 2611÷10.75≈242.9），改口径属全项目口径变更，"
+            "需单独立项重刷历史数字可比性")
 
 
 if __name__ == "__main__":
