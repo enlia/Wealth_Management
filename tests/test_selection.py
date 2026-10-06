@@ -240,6 +240,56 @@ class TestWarmupWindow:
                 f"预热 {WARMUP_TRADING_DAYS} <最长窗口 {max(windows)}，"
                 f"长窗口因子在年初会缺数据")
 
+    def test_长窗口因子在首年就有值(self):
+        """⚠️ **首年也必须预热**（实测踩过）：
+        初版写 `if y > y0: pad_start = ... else: pad_start = ys`，
+        于是**首年完全没有预热数据**。
+
+        实测 `build_panel(..., '20190101', '20191231')`：
+          pos250 覆盖率 **0.0%**（需要 250 日窗口，2019 年内凑不满）
+          mom120_skip20 覆盖率 7.5%
+
+        长窗口因子在首年大面积 NaN，
+        表现为「因子没数据」，容易被误判成「该股不合格」。
+        """
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "research" / "scripts"))
+        from factor_lab.config import is_a_share
+        from factor_lab.data import all_codes
+        from run_long_only import build_panel
+        codes = [c for c in all_codes() if is_a_share(c)][:150]
+        p = build_panel(codes, ["pos250", "rev5"], "20190101", "20191231")
+        cov250 = float(p["pos250"].notna().mean().mean())
+        cov5 = float(p["rev5"].notna().mean().mean())
+        assert cov250 > 0, (
+            f"pos250 在首年覆盖率 {cov250:.1%} —— 预热没生效。"
+            f"长窗口因子需要 250 个交易日，首年窗口内凑不满是必然的。")
+        # pos250 的覆盖率必然低于 rev5（窗口长得多），但不应为 0
+        assert cov250 < cov5, (
+            f"pos250({cov250:.1%}) 不应高于 rev5({cov5:.1%})，"
+            f"否则说明窗口长度没有生效")
+
+    def test_因子面板与价格面板索引一致(self):
+        """⚠️ **两个面板必须用同一裁剪区间**（实测踩过）：
+        因子裁了、price 没裁 → price 488 行 vs factor 244 行，
+        下游 `take_along_axis` 抛
+        `IndexError: shape mismatch ... (488,1) (244,30)`。
+
+        这个错在下游报出来看起来像 numpy 的问题，
+        实际是取数层两个面板口径不一致。
+        """
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "research" / "scripts"))
+        from factor_lab.config import is_a_share
+        from factor_lab.data import all_codes
+        from run_long_only import build_panel
+        codes = [c for c in all_codes() if is_a_share(c)][:150]
+        p = build_panel(codes, ["rev5"], "20190101", "20201231")
+        px = p["__price__"]
+        assert px.index.equals(p["rev5"].index), (
+            f"价格面板 {len(px.index)} 行 vs 因子面板 "
+            f"{len(p['rev5'].index)} 行，索引必须一致")
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
