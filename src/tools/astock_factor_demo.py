@@ -77,11 +77,14 @@ def load_prices_akshare(codes: list[str], start: str, end: str) -> pd.DataFrame:
 
     close = {}
     for i, code in enumerate(codes):
+        # ⚠️ adjust="hfq" 是 akshare 的**后复权**（基期不动、末期抬高），
+        #    与本项目 close_adj（前复权 qfq：末日=原价、历史压低）不是
+        #    同一口径，两侧收益序列不可混算。
         try:
             df = ak.stock_zh_a_hist(symbol=code, period="daily",
                                     start_date=start.replace("-", ""),
                                     end_date=end.replace("-", ""),
-                                    adjust="hfq")  # 前复权，规避除权跳空
+                                    adjust="hfq")  # 后复权（hfq），规避除权跳空
         except Exception as e:  # noqa: BLE001
             print(f"    {code} 失败: {e}")
             continue
