@@ -67,7 +67,7 @@ def _make_long(dates: list[str], code: str = "sh600000",
         "code": code,
         "open": close, "high": close, "low": close,
         "close": close,              # 原始价（未复权）
-        "close_adj": close,          # 后复权价
+        "close_adj": close,          # 前复权价
         "high_adj": close, "low_adj": close,
         "volume": np.full(n, 1e6),
         "amount": np.full(n, 1e7),
