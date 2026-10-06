@@ -104,13 +104,25 @@ class Test换算常数各自钉死:
 
     def test_engine常数为config同一引用_收口唯一出处(self):
         """engine 的双常数必须是 config 的同一对象（引用导出，不另定义副本）；
-        唯一定义源 = src/factor_lab/config.py。"""
+        唯一定义源 = src/factor_lab/config.py。
+
+        ⚠️ 小整数有驻留缓存（CPython 把 [-5, 256] 缓存为同一对象），
+           `is` 判不出「赋值副本」与「引用导出」（252 is 252 恒真）——
+           所以再加源码形态断言：engine 里不得出现常量定义句。
+        """
         from factor_lab.analysis import engine
         assert engine.SCALING_TRADING_DAYS is SCALING_TRADING_DAYS, (
             "engine.SCALING_TRADING_DAYS 不是 config 同一对象 —— "
             "定义副本会重新制造双源漂移")
         assert engine.YEAR_TRADING_DAYS is YEAR_TRADING_DAYS, (
             "engine.YEAR_TRADING_DAYS 不是 config 同一对象")
+        src = (ROOT / "src" / "factor_lab" / "analysis"
+               / "engine.py").read_text(encoding="utf-8")
+        redefined = re.findall(
+            r"^(SCALING_TRADING_DAYS|YEAR_TRADING_DAYS)\s*=\s*\d", src, re.M)
+        assert not redefined, (
+            f"engine.py 含常量定义句 {redefined} —— 唯一定义源是 "
+            "config.py，engine 只能 from config 引用导出")
 
 
 class Test倍数换算252:
