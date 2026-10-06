@@ -93,10 +93,10 @@ def build_migration_sql(daily_pairs, weekly_pairs) -> str:
         "-- 深市 B 股 bar 价格 ×10 归一（UNITS U7）｜由 fix_sz_b_close_scale.py 生成",
         "-- 执行主体：数据线批次（本 SQL 未在本工具内执行过）；建议整包单事务执行",
         "BEGIN;",
-        "PRECHECK 污染行数（预期 >0；首跑后复跑应为 0 → 幂等自证）:",
+        "-- PRECHECK 污染行数（预期 >0；首跑后复跑应为 0 → 幂等自证）",
         f"SELECT COUNT(*) FROM bar_daily WHERE ({glob}) AND close IS NOT NULL"
         f" AND vol > 0 AND amount > 0 AND {q};",
-        "PRECHECK bar_weekly 同口径:",
+        "-- PRECHECK bar_weekly 同口径",
         f"SELECT COUNT(*) FROM bar_weekly WHERE ({glob}) AND close IS NOT NULL"
         f" AND vol > 0 AND amount > 0 AND {q};",
         "-- 主修复：污染谓词圈行（复跑 0 命中，天然幂等）",
