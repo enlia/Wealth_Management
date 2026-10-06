@@ -79,6 +79,11 @@ def load_long_chunked(codes: list[str], start: str, end: str,
                 print(f"    {y}: {len(df):>10,} 行  累计 {total:>12,}")
     con.close()
     if not chunks:
+        # ⚠️ 可选数据缺失必须显式打印，不能默默返回空表（ENGINEERING 四）：
+        #   空表的成因可能是「区间外」「代码全错」「库里就没有这批数据」，
+        #   静默返回会让调用方把「取数失败」当成「该年没数据」。
+        print(f"    未加载到任何行情行（{len(codes)} 只，{start}~{end}）—— "
+              f"返回空表，请核对区间/代码/库内容")
         return pd.DataFrame()
     out = pd.concat(chunks, ignore_index=True).sort_values(
         ["code", "date"], kind="stable")

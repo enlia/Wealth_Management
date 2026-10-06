@@ -100,6 +100,9 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
         long = load_long_chunked(codes, pad_start, ye, years=(y - 1, y),
                                  verbose=False)
         if long.empty:
+            # 显式记录跳过原因，不默默 continue（ENGINEERING 四）
+            print(f"    {y}: 无行情行（{pad_start}~{ye}，{len(codes)} 只），"
+                  f"跳过该年")
             continue
         n_rows += len(long)
         # 🔴🔴 **预热数据必须在算因子之后、存结果之前才裁掉**
@@ -147,6 +150,8 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
             # ⚠️ 传**含预热行**的 `long` —— 滚动窗口需要上一年末的数据
             s = compute_factor(f, long)
             if s is None or s.empty:
+                # 显式记录跳过原因，不默默 continue（ENGINEERING 四）
+                print(f"      因子 {f}: {y} 无输出，跳过该年")
                 continue
             # compute_factor 返回 MultiIndex(date, asset) —— 层名是 asset
             wide = s.unstack("asset").sort_index()
@@ -393,7 +398,9 @@ def main() -> int:
         (OUTPUT / "run_meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n数据版本: {ver['version']}（已记录到 run_meta.json）")
-    except Exception as e:                                   # noqa: BLE001
+    except (ImportError, KeyError, OSError) as e:
+        # 只兜「版本记录本身缺件」（缺 data_version 模块/manifest 键/文件），
+        # 其余异常照原样抛出 —— 不能让数据版本记录悄悄失败。
         print(f"⚠ 版本记录失败: {e}")
 
     print("\n提示: 样本外结果才有参考价值；扣成本后为负的方案不可用。")

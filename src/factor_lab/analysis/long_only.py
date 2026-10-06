@@ -31,9 +31,6 @@ vol60  多空年化毛 −0.08  多空年化净 −0.28
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
@@ -52,8 +49,6 @@ from factor_lab.analysis.spec import (
     PortfolioSpec,
     _normalize_bounded,
 )
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 # ⚠️ **re-export**：`PortfolioSpec` / `_normalize_bounded` 已搬到 `spec.py`，
 #   但外部调用方（含既有测试）从 `long_only` 导入它们。
@@ -91,8 +86,11 @@ def build_long_only(
                     年化波动 33,494%、回撤 −261,897%，净值被打爆。
     buy_ok/sell_ok: 索引=日期，列=代码的 bool 面板，
                     True = 当日可买/ 可卖。None = 不施加涨跌停约束。
-                    ⚠️ **必须与 factor_values 的索引、列完全一致**，
-                       内部按下标对齐（`to_numpy`），列序不同会静默错配。
+                    ⚠️ **必须与 factor_values 的索引、列完全一致** ——
+                       `align_masks` 按**标签**校验，索引或列不一致会
+                       **直接抛错**（ValueError），不会静默错配。
+                       （早期版本按下标对齐，列序不同会静默错配；
+                        标签校验即为此而加。）
 
     返回
     ----
@@ -175,12 +173,15 @@ def build_long_only(
                                   buy_ok=buy_m, sell_ok=sell_m)
 
     inv = np.where(vol_mat > 0, 1.0 / vol_mat, np.nan)
-    # ⚠️ **必须先把 -1 哨兵屏蔽掉**，不能用 clip(下界, 0) 代替：
+    # ⚠️ **必须先把 -1 哨兵挡住，不能让它进 `np.take_along_axis`**，也不能用
+    #   clip(下界, 0) 代替：
     #   `np.take_along_axis` 用的是**负索引语义** ——
     #   held_mat 里的 -1 会取到**最后一列**（某只真实存在的股票），
     #   而不是「无持仓」。
     #   实测踩过：把 0 当哨兵同样错，列索引 0 是真实股票（如 sh600000）。
-    #   所以 sentinel 必须是 -1，且必须**在 take 之前**显式置 NaN。
+    #   ⇒ 实际步骤是两步：take 时用 `held_safe` 把哨兵槽**临时占位**成列 0，
+    #     take 之后立刻由 `bad` 掩码（含 `held_mat < 0`）把哨兵槽的取值
+    #     连同非法逆波动率一起置 NaN —— 哨兵槽不携带任何列 0 的信息。
     held_safe = np.where(held_mat < 0, 0, held_mat)
     picked_inv = np.take_along_axis(inv, held_safe, axis=1)
     bad = (held_mat < 0) | ~np.isfinite(picked_inv) | (picked_inv <= 0)
@@ -242,7 +243,7 @@ def build_long_only(
     #   「涨跌停约束到底生效了没有」只能通过**检查实际持仓**回答 ——
     #   持仓里若还有封涨停的票，说明约束没生效。
     #   而 `held_mat` 原先是 `simulate_matrix` 的局部变量，调用方拿不到
-    #   ⇒ `run_limit_constraint` 里的校验函数 `_verify_constraint_active`
+    #   ⇒ `run_limit_constraint` 里的校验函数 `verify_constraint_active`
     #   **接不上**（签名要held_mat，返回值里没有），只能空转。
     #   ⇒ 无条件附带（非 ok 时也给 None），调用方自行判None。
     res["held_mat"] = held_mat if res.get("ok") else None
