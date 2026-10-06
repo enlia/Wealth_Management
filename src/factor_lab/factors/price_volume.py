@@ -195,7 +195,6 @@ def hh_hl_score(long: pd.DataFrame, window: int = 20) -> pd.Series:
        用未复权价会把「除权」误读成「高点降低」，趋势结构直接判错。
     """
     d = _prep(long)
-    g = d.groupby("code", sort=False)
     hi = _px(d, "high").groupby(d["code"], sort=False).rolling(window).max() \
         .reset_index(level=0, drop=True)
     lo = _px(d, "low").groupby(d["code"], sort=False).rolling(window).min() \
