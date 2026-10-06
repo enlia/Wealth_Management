@@ -379,7 +379,9 @@ def main() -> int:
              "口径声明": list(AGENTS_CALIBER)},
             ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n数据版本: {ver['version']}")
-    except Exception as e:                                   # noqa: BLE001
+    except (ImportError, KeyError, OSError) as e:
+        # 只兜「版本记录本身缺件」（缺 data_version 模块/manifest 键/文件），
+        # 其余异常照原样抛出 —— 不能让数据版本记录悄悄失败。
         print(f"⚠ 版本记录失败: {e}")
 
     print()

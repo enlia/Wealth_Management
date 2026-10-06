@@ -23,8 +23,6 @@
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -34,8 +32,6 @@ from factor_lab.analysis.costs import CostModel
 
 if TYPE_CHECKING:                      # 避免运行期循环导入
     from factor_lab.analysis.long_only import PortfolioSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
 # ── 年化折算常量 ────────────────────────────────────────────────
