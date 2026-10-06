@@ -100,19 +100,31 @@ def price_scale(code, mkt=None):
     ⚠️ 交叉验证发现（源自 mootdx/tdxpy 的 SECURITY_COEFFICIENT）：
     并非所有品种都是 ×0.01。通达信按品种分级：
         A股 / 指数 / 板块指数 : 0.01
-        B股 / 基金 / 债券     : 0.001
+        沪 B股 / 基金 / 债券  : 0.001
+        深 B股（200/201/202）: 0.01   ← 与沪 B **不同纲**（U7，见下）
     实测对照：
         宁波银行B 900948  原始 3736    → ×0.001 = 3.736    ✅（×0.01=37.36 错）
+        深物业B  200011   库内 0.59   → ×0.01  = 5.90     ✅（×0.001=0.59 错 10×）
         上证指数  000001   原始 384219  → ×0.01  = 3842.19  ✅
         生物制药  880402   原始 239123  → ×0.01  = 2391.23  ✅
     注意：沪市 000xxx 是【指数】不是债券，别把 sh000001 误判成债券。
+
+    ⚠️ **深 B 与沪 B 必须分开判**（UNITS U7，2026-10-13 三方对拍定案）：
+       深 B（sz200/201/202 段）行情整数实为 ×0.01 缩放，旧版与基金/债券同归
+       0.001 → 库内 close 小 10 倍、跌停判定对深 B 单侧假阳性（2023 假封 9,189 格）。
+       定案证据：G4 恒等式 amount/(vol×close) 深 B 中位 9.95、沪 B 0.99；
+       Tushare 权威限价对拍 ×10 后 114/114 命中（对照 A 股 ×1 必中、×10 全不中）；
+       通达信导出物 stock_info.price/库内末日 close = 10.00。
+       （vipdoc 原始整数层原件不在机，该层直接证据 UNKNOWN；三方对拍定案。）
     """
     c = code
     m = mkt or market_of(c)
     if c.startswith("88"):
         return 0.01                                   # 板块指数
-    if c.startswith("900") or c.startswith("200"):
-        return 0.001                                  # B股（沪900 / 深200）
+    if c.startswith("900"):
+        return 0.001                                  # 沪 B（900xxx，×0.001 实测）
+    if c.startswith(("200", "201", "202")):
+        return 0.01                                   # 深 B（200/201/202 段，U7 ×0.01）
     if m == "sh":
         if c.startswith("000") or c.startswith("950"):
             return 0.01                               # 沪市指数
@@ -123,8 +135,8 @@ def price_scale(code, mkt=None):
             return 0.01                               # 深证指数
         if c[0] in "03":
             return 0.01                               # 深市 A股（000/001/002/003/301/302）
-        return 0.001                                  # 1x 基金债券、2x B股
-    return 0.01                                       # A股（00/30 开头）与北交所
+        return 0.001                                  # 1x 基金/债券（2x B股已上移 0.01，U7）
+    return 0.01                                       # A股（00/30 开头）与北交所                                       # A股（00/30 开头）与北交所
 
 
 def read_day(code, kind="lday", mkt=None):
