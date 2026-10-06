@@ -112,6 +112,33 @@ def _parse_list_dates(info: pd.DataFrame | None) -> pd.Series:
     return s.dropna()
 
 
+def _require_list_dates(d: pd.DataFrame, info: pd.DataFrame | None) -> pd.Series:
+    """返回可解析的上市日期序列；整段不可判定时**显式报错**（原因 + 计数）。
+
+    ⚠️ 禁止静默跳过整段上市年限过滤（铁律 4 / P4）：
+       info=None / 无 list_date 列 / list_date 全部不可解析时，旧实现零打印
+       跳过整段过滤 —— 实测上市 20 天的 sz301999 照样进池。
+       判龄要么有依据要么报错；显式关闭该过滤的出口是 ``cfg.exclude_new=False``。
+    """
+    n_codes = int(d["code"].nunique())
+    if info is None:
+        reason = "info 未提供"
+    elif "list_date" not in info.columns:
+        reason = "stock_info 无 list_date 列"
+    else:
+        ld = _parse_list_dates(info)
+        if not ld.empty:
+            return ld
+        reason = f"stock_info.list_date 全部不可解析（stock_info {len(info):,} 行）"
+    raise ValueError(
+        f"上市年限过滤无法执行：{reason}。\n"
+        f"  受影响 {n_codes} 只 / {len(d):,} 行 —— 判龄依据缺失，拒绝静默跳过整段过滤"
+        f"（静默跳过曾放进上市 20 天的新股）。\n"
+        f"  处理：补齐 stock_info.list_date 后重跑；"
+        f"或显式设 cfg.exclude_new=False 关闭该过滤（结果不得再引用「已排除次新」口径）。"
+    )
+
+
 def _listing_base(
     d: pd.DataFrame,
     info: pd.DataFrame | None,
@@ -133,7 +160,7 @@ def _listing_base(
     数据晚起点的老股在短窗口可能被保守淘汰（与「次新误放」的方向性错误相比
     是更可接受的一侧），且受影响只数逐次打印可见。
     """
-    ld = _parse_list_dates(info)
+    ld = _require_list_dates(d, info)
     has_ld = d["code"].isin(ld.index)
     base = pd.to_datetime(d["code"].map(ld))
 
