@@ -67,7 +67,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from factor_lab.config import is_a_share
+from factor_lab.config import SCALING_TRADING_DAYS, is_a_share
 from factor_lab.data import all_codes, load_prices
 from factor_lab.market_rules import (
     board_of,
@@ -292,7 +292,9 @@ def audit_price_data(
     # 对等权买入持有的影响
     b_raw = (1 + ret.mean(axis=1)).cumprod().iloc[-1]
     b_clean = (1 + clean.mean(axis=1)).cumprod().iloc[-1]
-    years = len(prices) / 252
+    # 交易日数折年数属 ② 时长换算（口径值 YEAR_TRADING_DAYS = 243）；
+    # 此处历史按 252 折算，本批值冻结不变（层间分歧另行处理）。
+    years = len(prices) / SCALING_TRADING_DAYS
 
     out = {
         "n_assets": int(prices.shape[1]),

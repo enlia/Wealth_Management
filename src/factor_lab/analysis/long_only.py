@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from factor_lab.analysis.selection import rank_topk, select_with_buffer
+from factor_lab.config import SCALING_TRADING_DAYS, YEAR_TRADING_DAYS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -205,7 +206,7 @@ def build_long_only(
     #   实测 5,606 只 × 2,611 日跑到 20 分钟没跑完（O(n²)）。
     #   pandas 的 rolling 是 O(n)，预计算后逐日只做 O(n_hold) 的索引。
     rolling_vol = (past.rolling(spec.vol_lookback, min_periods=max(
-        20, spec.vol_lookback // 3)).std() * np.sqrt(252))
+        20, spec.vol_lookback // 3)).std() * np.sqrt(SCALING_TRADING_DAYS))
 
     #⚠️ 性能：整段**向量化**。
     #   初版是逐日 for 循环 + 每日全表切片，
@@ -347,10 +348,11 @@ def _year_span(dates) -> float:
     if hasattr(d0, "year"):                      # Timestamp 索引
         days = (d1 - d0).days
     else:                                        # 位置索引，兜底按交易日折算
-        # 243 = A股实际年均交易日（实测 2026-01~09 为 243日）。
-        # ⚠️ 这条分支是**兜底**，与主口径（自然日）不同；
+        # YEAR_TRADING_DAYS = 243 = ② 时长换算兜底层（A 股实测年均交易日
+        #   2,611 交易日 ÷ 10.75 历年 = 242.9，见 PITFALLS P10（1·补）②层）。
+        # ⚠️ 这条分支是**兜底**，与主口径（自然日 365.25，③ 层）不同；
         #   混用会让同一份收益算出两个年数，正是本函数要消灭的问题。
-        return max(len(dates) / 243.0, 1e-9)
+        return max(len(dates) / YEAR_TRADING_DAYS, 1e-9)
     return max(days / 365.25, 1e-9)
 
 
@@ -445,7 +447,7 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     #   252 是美股口径，用它会让「年数」偏大约 3.5%，年化被系统性压低。
     years = _year_span(dates)
     cagr = float(nav[-1] ** (1 / years) - 1) if nav[-1] > 0 else -1.0
-    vol = float(rr.std() * np.sqrt(252))
+    vol = float(rr.std() * np.sqrt(SCALING_TRADING_DAYS))
     sharpe = float(cagr / vol) if vol > 0 else np.nan
     nav_s = pd.Series(nav, index=dates, dtype=float)
     dd = float((nav_s / nav_s.cummax() - 1).min())
@@ -462,8 +464,8 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
         "夏普": sharpe,
         "最大回撤": dd,
         "平均换手": float(turn[ok].mean()) if ok.any() else 0.0,
-        "平均年成本": float(cost_arr[ok].mean() * 252) if ok.any() else 0.0,
-        "年化毛收益": float(cagr + cost_arr[ok].mean() * 252) if ok.any() else cagr,
+        "平均年成本": float(cost_arr[ok].mean() * SCALING_TRADING_DAYS) if ok.any() else 0.0,
+        "年化毛收益": float(cagr + cost_arr[ok].mean() * SCALING_TRADING_DAYS) if ok.any() else cagr,
         "期数": int(T),
     }
 

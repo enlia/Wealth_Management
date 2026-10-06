@@ -31,14 +31,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from factor_lab.analysis.scorecard import build_scorecard
-from factor_lab.config import DB_PATH, DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR
+from factor_lab.config import (DB_PATH, DEFAULT_COST, DEFAULT_RESEARCH,
+                               OUTPUT_DIR, SCALING_TRADING_DAYS)
 from factor_lab.data import load_long, load_prices, load_stock_info
 from factor_lab.data.universe import build_universe
 from expand_factor_library import build_pv_factors
 from optimize_turnover import backtest_holdings, group_rank, zscore_cs
 from run_financial_study import build_financial_factors, neutralize
 
-TRADING_DAYS = 252
+TRADING_DAYS = SCALING_TRADING_DAYS  # ① 倍数换算层，唯一出处 config
 
 # Qlib 官方基准（CSI300 + Alpha158，20 种子均值，2026-10-05 抓取官方 README）
 QLIB_BENCH = {

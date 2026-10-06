@@ -38,14 +38,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from factor_lab.analysis.scorecard import SCORING_RULES
-from factor_lab.config import DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR, is_a_share
+from factor_lab.config import (DEFAULT_COST, DEFAULT_RESEARCH, OUTPUT_DIR,
+                               SCALING_TRADING_DAYS, is_a_share)
 from factor_lab.data import all_codes, load_long, load_prices, load_stock_info
 from factor_lab.data.universe import build_universe
 from expand_factor_library import build_pv_factors
 from run_financial_study import (build_financial_factors, neutralize,
                                  pick_sample)
 
-TRADING_DAYS = 252
+TRADING_DAYS = SCALING_TRADING_DAYS  # ① 倍数换算层，唯一出处 config
 
 
 def zscore_cs(s: pd.Series) -> pd.Series:
