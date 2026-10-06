@@ -303,10 +303,21 @@ def _split(code: str) -> tuple[str | None, str]:
 
 
 def market_of(code: str) -> str | None:
-    """判断市场目录。带前缀则直接返回前缀，否则按通达信目录规则推断。"""
+    """判断市场目录。带前缀则直接返回前缀，否则按通达信目录规则推断。
+
+    ⚠️ 92xxxx 必须判bj，**不能**按「9 开头→sh」处理（2026-10-06 review 抓出）。
+       北交所 2023 年起启用 92xxxx 新代码段（920000 等，见上方坑 2），
+       但 `startswith("9")` 会把它归到上交所 —— 后果是
+       `bj920680`（广道退）被判成 `sh920680` → `is_a_share` 返回 False
+       → 从退市股名单里被静默剔除。
+       判别顺序：**先扣掉已知例外段（88 板块/899 指数），再判首位**。
+    """
     c = code.strip().lower()
     if len(c) == 8 and c[:2] in _PREFIXES:
         return c[:2]
+    # 92xxxx 是北交所，与「9 开头=上交所」冲突，必须先判
+    if c.startswith("92"):
+        return "bj"
     if c.startswith(("6", "9", "5", "1", "88")):
         return "sh"
     if c.startswith(("0", "3", "2")):

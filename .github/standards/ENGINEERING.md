@@ -245,26 +245,37 @@ if data is None:
 
 ### ⚠️ 写操作必须验证「实际影响行数」（2026-10-06 新增）
 
-`executemany` / `execute` **返回成功不代表写进去了**。
-实测（SQLite 3.53.1，`bar_daily` 表，19,623 条 UPDATE）：
+**先说清楚这不是 SQLite 的 bug** ——子agent review 复现后，
+同样 19,623 条参数、同一张表、同一个连接，`executemany` **写入成功**
+（实测 549 行全部命中）。
 
-| 写法 | 实际命中 | 是否报错 |
-|---|---|---|
-| `executemany` | **0 行** | ❌ 不报错 |
-| 逐条 `execute` | 19,623 行 | — |
+真正的原因是**传进去的迭代器已经被消费完了**：
 
-同参数、同连接、同一条 SQL。**`rowcount` 也是 0，不抛异常。**
-排查花了六轮：先怀疑 `date` 类型（确实是 INTEGER，但改成int 仍为 0）、
-再怀疑 `itertuples` 的 namedtuple、再怀疑 autocommit / 事务回滚 / 并发锁 ——
-全部排除，最后靠「逐条 execute 命中率 100%」反推出批量路径失效。
+```python
+gen = (x for x in rows)      # 生成器
+_ = len(list(gen))           # ← 任何前置操作碰过它（len/list/打印/zip）
+cur.executemany(sql, gen)    # ← 写入 0 行，不报错
+```
+
+实测对照：
+
+| 传入对象 | 实际写入 | `rowcount` | 是否报错 |
+|---|---|---|---|
+| `list`（500 条） | **549 行全部命中** | 正常 | — |
+| **已耗尽的生成器** | **0 行** | **-1** | ❌ 不报错 |
+
+`itertuples()` / `iterrows()` / 任何生成器都是一次性的。
+只要前面有任何一个操作碰过它（打印长度、算个数、传给 zip），
+后面就静默写入 0 行，`rowcount` 返回 `-1`。
 
 **规则**：
 
 ```python
-# ❌ 禁止：写完就当成功
-cur.executemany("UPDATE ... WHERE code=? AND date=?", rows)
+# ❌ 禁止：直接把 DataFrame 迭代器交给 executemany
+cur.executemany(sql, df.itertuples(index=False))
 
-# ✅ 必须：逐条执行 + 统计未命中 + 写后独立验证
+# ✅ 必须：先物化成 list，再逐条统计未命中，最后独立验证
+rows = [(str(r.code), int(r.date), float(r.v)) for r in df.itertuples(index=False)]
 miss = sum(1 for r in rows if cur.execute(sql, r).rowcount == 0)
 if miss:
     raise RuntimeError(f"{miss} 行未命中，已中止")
@@ -273,11 +284,14 @@ if got < 0.90 * total:
     raise RuntimeError(f"只命中 {got}/{total}，已中止")
 ```
 
-**判据**：任何 `UPDATE` / `INSERT` 之后，必须用一条独立的 `SELECT` 确认行数。
-**「没抛异常」和「rowcount > 0」都不能作为写入成功的证据。**
+**判据**：任何 `UPDATE` / `INSERT` 之后，必须用一条**独立的 `SELECT`** 确认行数。
+**「没抛异常」和「`rowcount` 不为 0」都不能作为写入成功的证据**
+——`rowcount = -1` 恰恰是「什么都没写」的信号。
 
-这条与 P17（回测前必做数据审计）同源：
-**审计脚本自己也可能静默失效，所以审计结果要有第二套独立路径交叉验证。**
+> 排查这个花了两轮弯路：第一轮误以为是 `date` 类型、`namedtuple`、
+> autocommit、事务回滚、并发锁，全排除后才靠「逐条 execute 命中率 100%」
+> 反推出真正原因是迭代器被消费。**这就是 P17 的延伸 ——
+> 审计脚本自己也可能静默失效，审计结果要有第二套独立路径交叉验证。**
 
 ---
 
