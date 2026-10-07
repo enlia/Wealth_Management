@@ -22,7 +22,7 @@ U1「修正三问」对位（UNITS.md U7③ 指名走此三问）::
 幂等三道防线（测试 test_sz_b_close_scale.py 钉死）::
 
     PRECHECK → 污染谓词圈行 UPDATE（比值 ∈ [6,15] = 10× 净痕区间，复跑 0 命中）
-             → 零成交/缺值行走原值三键逐条 UPDATE（code,date,close 原值匹配）
+             → 谓词窗外杂行（低成交噪行）走原值三键逐条 UPDATE（code,date,close 原值匹配）
     POSTCHECK → 污染残留 = 0
 """
 from __future__ import annotations
@@ -85,7 +85,8 @@ def is_sz_b_contaminated(code, amount, vol, close) -> bool:
 def build_migration_sql(daily_pairs, weekly_pairs) -> str:
     """生成迁移 SQL 文本。daily_pairs/weekly_pairs = [(code, date, close 原值)]。
 
-    零成交/缺值行无 G4 比值可判 → 逐条原值三键匹配（幂等：修过即不匹配）。
+    谓词窗外杂行（低成交噪行）无 G4 比值可判（二行实测 G4 比值 15.07/18.02，
+    落 [6,15] 圈窗之外）→ 逐条原值三键匹配（幂等：修过即不匹配）。
     """
     glob = " OR ".join(f"code GLOB '{g}'" for g in SZB_GLOBS)
     q = "amount / (vol * close) BETWEEN 6.0 AND 15.0"
@@ -106,7 +107,7 @@ def build_migration_sql(daily_pairs, weekly_pairs) -> str:
         "UPDATE bar_weekly SET open=open*10.0, high=high*10.0, low=low*10.0,"
         " close=close*10.0",
         f" WHERE ({glob}) AND close IS NOT NULL AND vol > 0 AND amount > 0 AND {q};",
-        "-- 零成交/缺值行：原值三键逐条（code,date,close 原值匹配 → 复跑 0 命中）",
+        "-- 谓词窗外杂行（低成交噪行）：原值三键逐条（code,date,close 原值匹配 → 复跑 0 命中）",
     ]
     lines = list(head)
     for tab, pairs in (("bar_daily", daily_pairs), ("bar_weekly", weekly_pairs)):
@@ -189,7 +190,7 @@ def main() -> int:
         nclose = con.execute(
             f"SELECT COUNT(*) FROM bar_daily WHERE ({glob}) AND close IS NULL").fetchone()[0]
         print(f"\n深 B 污染行（谓词命中）: bar_daily {bad:,} / bar_weekly {w:,}")
-        print(f"零成交/缺值行走三键路径: {loose:,}（占深 B 行 {z:,}）"
+        print(f"谓词窗外杂行（低成交噪行）走三键路径: {loose:,}（占深 B 行 {z:,}）"
               f"；close IS NULL 空转行 {nclose:,}（不迁移，open/high/low 同行为空转）")
         # ⚠️ 三值逻辑：vol=0 时 amount/(vol*close) 为 NULL，
         #    `NOT (NULL BETWEEN …)` 不命中 → 必须用 OR 平铺 + 前项 TRUE 短路。
