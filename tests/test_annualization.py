@@ -71,7 +71,7 @@ _LONG = pd.DataFrame({
     "code": ["sh600000"] * len(_CLOSES),
     "date": _DATES,
     "close": _CLOSES,
-    "close_adj": _CLOSES,   # 因子口径按后复权价（_px 强制要求该列）
+    "close_adj": _CLOSES,   # 因子口径按前复权 qfq 价（_px 强制要求该列）
 })
 
 DATES = pd.date_range("2023-01-02", periods=3, freq="B")
