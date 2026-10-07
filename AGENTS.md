@@ -248,7 +248,14 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 ### 6. 工作树（git worktree）统一位置（用户指定）
 
 - 本项目任何 `git worktree add` **一律放到 `C:\Documentation\WorkSpace\Wealth_Management\.worktree\` 下**（子目录自命名），用毕删除并 `git worktree prune`。
-- `.worktree/` 不进版本控制（`.gitignore` 归口项目级改动单补一行）。
+- .worktree/ 不进版本控制（.gitignore 归口项目级改动单补一行）。
+- ⛔ **严禁在 worktree 内创建指向主树 data/、untime/、eference/ 的目录联接（junction / symlink）**：
+  `git worktree remove --force` 的递归删除会**穿透联接删掉主树数据**——2026-10-07 实测事故：主树
+  `data/market.db`（2,780,823,552 B）与 `runtime/`（108 文件）被连带删除，靠项目外归档才恢复（自伤册第 17 号）。
+  需要共享数据的合法方式：①脚本内用**显式路径/环境变量**指向主树；②复制**只读副本**进 worktree。
+  确需链接时，删除 worktree 前必须先用 `cmd /c rmdir <link>` **只删链接本体**，再 `git worktree remove`。
+- **资产目录必须常驻项目外独立副本**：`data/`（market.db）与 `runtime/` 的兜底归档放
+  `C:\Documentation\WorkSpace\_archive\`（本次唯一救命件），重大改动后刷新。
 
 ---
 
