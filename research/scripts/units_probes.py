@@ -176,3 +176,121 @@ def snapshot_pb_guard(price, bps, pb) -> dict:
         "tol": tol,
         "pass": abs_dev <= tol,
     }
+
+
+# ── G4 量纲恒等式探针（U5 逮法 · U7② 门）──────────────────────────
+# PROBE_G4_IDENTITY（提案逐字接入；逮法出处 = U5 实录比值直方图双净痕
+# 0.099=1000×/100×、9.98=10×，一眼分家）：
+#   amount/(vol×close) 量纲恒等式：分组（A股等/基金债/沪B/深B）中位 +
+#   行级比值直方图，过 UNITS U7② 门（比值 >1.5 或 <0.67 疑量纲污染；
+#   缺值=UNKNOWN 禁填空）；深 B 组（is_b_share）单列，深 B 组中位过门
+#   即报 U7 同族污染。
+# **判据单源**：g4_ratio / g4_verdict / is_sz_b_share 复用
+# src/tools/fix_sz_b_close_scale.py —— U7② 阈值（0.67/1.5）只在该处定义，
+# 本块不重复造阈值（阈值哑化变异对两面同时生效，守护用例
+# tests/test_units_probes_g4.py 逐条钉语义）。
+import statistics  # noqa: E402
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_ROOT = _Path(__file__).resolve().parents[2]
+_sys.path.insert(0, str(_ROOT / "src"))
+_sys.path.insert(0, str(_ROOT / "src" / "tools"))
+from fix_sz_b_close_scale import (  # noqa: E402
+    g4_ratio,
+    g4_verdict,
+    is_sz_b_share,
+)
+
+G4_IDENTITY_FORMULA = "amount/(vol×close)"
+G4_GROUP_ORDER = ("A股等", "深B", "沪B", "基金/债")
+# 行级比值直方图分箱（仅展示；**门判只用 U7② 两阈值**）。界点取双净痕实录
+# 形态位（0.2/5）、门界（0.67/1.5）与幂次净痕位（15）。
+G4_HIST_LABELS = ("≤0.2", "0.2~0.67", "0.67~1.5 自洽", "1.5~5", "5~15", "≥15")
+
+
+def g4_group(code: str) -> str:
+    """品种分组（与 fix_sz_b_close_scale.g4_summary 分组同义；深 B 判定走单源）。"""
+    c = str(code)
+    n = c[2:] if len(c) == 8 and c[:2] in ("sh", "sz", "bj") else c
+    if is_sz_b_share(c):
+        return "深B"
+    if c.startswith("sh900"):
+        return "沪B"
+    if n.startswith(("15", "16", "18")) or c.startswith(
+            ("sh5", "sh1", "sz1", "sh11", "sh12")):
+        return "基金/债"
+    return "A股等"
+
+
+def _hist_bucket(r: float) -> str:
+    if r <= 0.2:
+        return G4_HIST_LABELS[0]
+    if r < 0.67:
+        return G4_HIST_LABELS[1]
+    if r <= 1.5:
+        return G4_HIST_LABELS[2]
+    if r < 5.0:
+        return G4_HIST_LABELS[3]
+    if r < 15.0:
+        return G4_HIST_LABELS[4]
+    return G4_HIST_LABELS[5]
+
+
+def g4_identity_report(rows) -> dict:
+    """G4 门探针：分组中位（U7② 门）+ 行级比值直方图；缺值=UNKNOWN 禁填空。
+
+    rows : 可迭代 ``(code, amount, vol, close)`` 四元组。
+    返回 : ``groups[组] = {n_valid, n_unknown, median, verdict}``（组无有效行时
+           median=None、verdict="unknown"，**不填 0 不冒算**）、``row_verdicts``
+           （行级判定序列，含 "unknown"）、``hist``（行级比值桶计数）、
+           ``sz_b_alert``：深 B 组中位过门="U7 同族污染"、门内="无"、不可检
+           （组无有效行）="UNKNOWN"。
+    """
+    hist = {k: 0 for k in G4_HIST_LABELS}
+    vals: dict[str, list[float]] = {}
+    unk: dict[str, int] = {}
+    row_verdicts: list[str] = []
+    n_rows = 0
+    for code, amount, vol, close in rows:
+        n_rows += 1
+        r = g4_ratio(amount, vol, close)
+        row_verdicts.append(g4_verdict(r))
+        grp = g4_group(code)
+        if r is None:
+            unk[grp] = unk.get(grp, 0) + 1     # UNKNOWN 单列：禁填空、不入统计
+            continue
+        vals.setdefault(grp, []).append(r)
+        hist[_hist_bucket(r)] += 1
+    groups = {}
+    for grp in G4_GROUP_ORDER:
+        good = sorted(vals.get(grp, []))
+        if good:
+            med = statistics.median(good)
+            groups[grp] = {
+                "n_valid": len(good),
+                "n_unknown": unk.get(grp, 0),
+                "median": med,
+                "verdict": g4_verdict(med),
+            }
+        else:
+            groups[grp] = {
+                "n_valid": 0,
+                "n_unknown": unk.get(grp, 0),
+                "median": None,
+                "verdict": "unknown",
+            }
+    szb_med = groups["深B"]["median"]
+    if szb_med is None:
+        sz_b_alert = "UNKNOWN"                  # 组不可检：不猜、不报
+    else:
+        sz_b_alert = "U7 同族污染" if g4_verdict(szb_med) == "suspect" else "无"
+    return {
+        "formula": G4_IDENTITY_FORMULA,
+        "n_rows": n_rows,
+        "n_unknown": sum(unk.values()),
+        "hist": hist,
+        "row_verdicts": row_verdicts,
+        "groups": groups,
+        "sz_b_alert": sz_b_alert,
+    }
