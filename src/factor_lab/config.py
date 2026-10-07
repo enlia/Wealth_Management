@@ -394,6 +394,15 @@ def is_a_share(code: str) -> bool:
 
 
 def is_b_share(code: str) -> bool:
-    """B 股：沪 900xxx / 深 200xxx，价格系数 0.001。"""
+    """B 股：沪 900xxx / 深 200xxx / 201xxx / 202xxx。
+
+    ⚠️ 深 B 的 **201 段曾漏判**（2026-10-13 封板补完单实测）：
+       sz201872「招港B」在旧版（只判 900/200）判不出 B 股 → 落进「其他品种」，
+       UNITS U7 连坐约 242 格/年跌停侧假封。201 段实证存在（sz201872），
+       202 段无实例（段族归一，异例由 G4 门兜底）。
+    ⚠️ **深 B 与沪 B 价格系数不同纲**（UNITS U7）：沪 B(900) ×0.001、
+       深 B(200/201/202) ×0.01 —— 本判定与 ``tdx.price_scale`` 深 B 分支
+       逐码同义（跨面一致守护见 tests/test_units_g4_identity.py）。
+    """
     _, c = _split(code)
-    return c.startswith(("900", "200"))
+    return c.startswith(("900", "200", "201", "202"))
