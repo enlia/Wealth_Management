@@ -29,26 +29,22 @@ import numpy as np
 import pandas as pd
 
 from factor_lab.analysis.costs import CostModel
+from factor_lab.config import SCALING_TRADING_DAYS, YEAR_TRADING_DAYS
 
 if TYPE_CHECKING:                      # 避免运行期循环导入
     from factor_lab.analysis.long_only import PortfolioSpec
 
 
-# ── 年化换算常量（两种语义，不能混用）──────────────────────────
-# ① 倍数换算：把「每期/每日的比率」**放大**到年频（×N 或 ×√N）。
-#    取 252 —— 规范真源 PITFALLS P10 钉死公式：
-#        gross = spread * (252 / periods[0])
-#    年化波动 ×√SCALING_TRADING_DAYS、年成本/年化毛 ×SCALING_TRADING_DAYS
-#    同此口径。
-SCALING_TRADING_DAYS = 252
-
-# ② 时长换算：把「交易日数」折成**年数**（数据横跨几年）。
-#    取 243 —— A股实测算式：2,611 交易日 ÷ 10.75 历年 = 242.9 ≈ 243
-#    （年均交易日数；另一佐证：2026-01~09 窗口实测 243 日）。
-#    `_year_span` 的位置索引兜底分支用它。
-#    ⚠️ `_year_span` 主路径（有日期对象）是自然日 365.25，与基准侧同一定义；
-#       本常量只兜底「没有日期对象」的输入。
-YEAR_TRADING_DAYS = 243
+# ── 年化换算常量（唯一定义源 = factor_lab.config；此处只引用导出）──────
+# 语义分层与出处注释见 config 的常量块（PITFALLS P10（1·补）三层口径）：
+#   ① 倍数换算 252 = SCALING_TRADING_DAYS —— 年化波动 ×√SCALING_TRADING_DAYS、
+#      年成本/年化毛 ×SCALING_TRADING_DAYS，公式口径
+#      `gross = spread * (252 / periods[0])` 同源；
+#   ② 时长换算兜底 243 = YEAR_TRADING_DAYS —— `_year_span` 位置索引兜底分支
+#      （A 股实测 2,611 ÷ 10.75 = 242.9 ≈ 243，年均交易日；另一佐证：
+#        2026-01~09 窗口实测 243 日）；
+#   ③ `_year_span` 主路径（有日期对象）= 自然日 365.25，不设常量。
+# ① 与 ② 语义不同、不能混用；本模块不另定义常量，仅供既有导入方按名引用。
 
 
 def _year_span(dates) -> float:
@@ -197,12 +193,15 @@ def simulate_matrix(dates, held_mat, w_mat, fwd: pd.DataFrame,
     #   同一份收益，两个年化差 0.50pp/年，而「超额」是全部结论的判据。
     #   ⇒ 统一为**自然日**口径（几何年化的标准定义）。
     #
-    # ⚠️ 年数用 `_year_span`：主路径自然日 365.25（与基准侧同一定义），
-    #   位置索引兜底按 YEAR_TRADING_DAYS（时长换算）。
+    # ⚠️ 年化换算**三分层**（各常数管各语义、勿一刀切，PITFALLS P10(1·补)）：
+    #     ① 倍数换算 = SCALING_TRADING_DAYS 252（spread×252/periods、波动
+    #        ×√252、成本 ×252）—— 252 只当乘数，误当除数算年数会把 10.75 年
+    #        记成 10.36 年（2,611 交易日 ÷ 243 口径），年化被系统性**抬高**；
+    #     ② 无日期索引的兜底年跨越 = 交易日数 ÷ YEAR_TRADING_DAYS 243；
+    #     ③ 有日期的年跨越 = 年数按日期跨度 = 自然日 365.25
+    #        （本函数主路径，与基准侧同一定义）。
+    #   本函数带日期索引 ⇒ 年数取 ③；只剩行数口径才用 ②（len/243）。
     #   换别的年数口径会让同一份收益算出两个年化，「超额」直接偏。
-    # ⚠️ 时长换算不用 `len/252`：早期用 252 做时长换算，会把 10.75 年
-    #   （2,611 交易日 ÷ 243）记成 10.36 年（÷252）—— 年数被记小，
-    #   几何年化被系统性**抬高**。
     years = _year_span(dates)
     cagr = float(nav[-1] ** (1 / years) - 1) if nav[-1] > 0 else -1.0
     # ⚠️ 倍数换算：日频比率放大到年频统一用 `SCALING_TRADING_DAYS`
