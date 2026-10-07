@@ -198,8 +198,13 @@ def build_factor_wide(panel: pd.DataFrame, px_raw: pd.DataFrame,
     for n in names:
         s = fac[n]
         if neutral:
-            s = neutralize(s, ind.to_numpy(),
-                           cap.to_numpy() if cap is not None else None)
+            # ⚠️ 必须先 reindex 对齐（照 run_financial_study._neut 原样步骤）：
+            #    s 已 dropna 比 daily 短（全量实测差 176 行），不对齐会在
+            #    neutralize 里 Length mismatch 直接炸；小集合冒烟 NaN≈0 掩盖此缝。
+            ind_s = ind.reindex(s.index)
+            cap_s = cap.reindex(s.index) if cap is not None else None
+            s = neutralize(s, ind_s.to_numpy(),
+                           cap_s.to_numpy() if cap_s is not None else None)
         wide[n] = s.unstack("asset").reindex(index=trading_days)
     return wide
 
