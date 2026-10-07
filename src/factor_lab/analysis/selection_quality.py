@@ -28,7 +28,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TRADING_DAYS = 252
+from ..config import SCALING_TRADING_DAYS
+
+TRADING_DAYS = SCALING_TRADING_DAYS  # ① 倍数换算层，唯一出处 config
 
 
 # ════════════════════════════════════════════════════════════════

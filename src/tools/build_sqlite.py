@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS stock_info (
     code TEXT PRIMARY KEY, name TEXT, price REAL, chg REAL, pe REAL, pb REAL,
     mktcap REAL, float_mktcap REAL, turnover REAL, vol_ratio REAL,
     revenue REAL, net_profit REAL, net_assets REAL, roe REAL, bps REAL,
+    net_assets_ord REAL,        -- 归属母公司普通股股东权益（亿元，U6 扣其他权益工具口径派生列）
     shares REAL, report_date TEXT, list_date TEXT, industry TEXT, region TEXT,
     boards TEXT, n_boards INT
 );
@@ -70,6 +71,46 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY, value TEXT
 );
 """
+
+# ── stock_info 权益口径记录（U6 规则③：不带口径描述的 net_assets/bps 不入合成面）──
+# 后缀约定：_ord = 归属母公司普通股股东权益（已扣其他权益工具）。
+STOCK_INFO_CALIBER_META = (
+    ("stock_info.net_assets",
+     "归属母公司股东权益合计_含其他权益工具_亿元（通达信 JZC 实测口径；U6："
+     "= ts_balance_sheet.total_hldr_eqy_exc_min_int，未扣 oth_eqt_tools）"),
+    ("stock_info.net_assets_ord",
+     "归属母公司普通股股东权益_亿元（U6 派生列，_ord=普通股权益；= bps × shares "
+     "≈ 归母 − COALESCE(oth_eqt_tools,0)，含 bps 三位小数舍入误差界 ~1e-4 相对；"
+     "精确扣减用 UNITS U6 ① 的 C 式）"),
+    ("stock_info.bps",
+     "每股普通股净资产_元（通达信 TZMGJZ 实测口径；U6："
+     "= (归母 − COALESCE(oth_eqt_tools,0)) × 1e8 / total_share）"),
+    ("stock_info.shares",
+     "总股本_亿股（U3 同名不同纲：ts_balance_sheet.total_share 为【股】）"),
+)
+
+
+def derive_equity_caliber(u2: pd.DataFrame) -> pd.DataFrame:
+    """派生 U6 普通股权益口径列 net_assets_ord = bps × shares（亿元）。
+
+    stock_info 原生两列的权益切分口径不同（A18 判决实证）：net_assets（通达信
+    JZC）是【含其他权益工具】口径、bps（TZMGJZ）是【普通股】口径，
+    net_assets/shares 当 bps 反推会系统性偏差 = 其他权益工具占归母比
+    （sz000001 实测 17.09%）。派生列用已扣口径的 bps×shares 给普通股权益，
+    原生列不覆写、口径记入 meta（STOCK_INFO_CALIBER_META，U6 规则③）。
+    NULL 传播不冒算：任一输入为空 → 派生值为空。
+    """
+    missing = [c for c in ("bps", "shares") if c not in u2.columns]
+    if missing:
+        raise ValueError(
+            f"net_assets_ord 派生缺列（{missing}）—— universe.csv 无每股净资产/"
+            f"总股本列（base_dbf.csv 缺失时如此），补财务数据后重跑，不静默置 NULL"
+        )
+    out = u2.copy()
+    bps = pd.to_numeric(out["bps"], errors="raise")
+    shares = pd.to_numeric(out["shares"], errors="raise")
+    out["net_assets_ord"] = bps * shares
+    return out
 
 
 def build():
@@ -127,6 +168,7 @@ def build():
     print(f"  周线写入 {time.perf_counter()-t1:.0f}s")
 
     # 股票信息
+    caliber_meta = list(STOCK_INFO_CALIBER_META)
     if os.path.exists("universe.csv"):
         u = pd.read_csv("universe.csv", dtype={"代码": str})
         cols = {
@@ -149,6 +191,17 @@ def build():
         for col in ("mktcap", "float_mktcap"):
             if col in u2.columns:
                 u2[col] = u2[col].map(to_wan)
+
+        # ⚠️ 权益口径统一（U6/A18 判决）：net_assets=含其他权益工具口径、
+        #    bps=普通股口径，禁止互推；派生 net_assets_ord（普通股权益）随行，
+        #    口径写进 meta（U3 处方款）。
+        if {"bps", "shares"}.issubset(u2.columns):
+            u2 = derive_equity_caliber(u2)
+            keep = keep + ["net_assets_ord"]
+        else:
+            caliber_meta.append(("stock_info.net_assets_ord",
+                                 "未派生：universe.csv 缺 bps/shares 列"
+                                 "（base_dbf.csv 缺失）——显式记档，不静默置 NULL"))
 
         con.executemany(
             f"INSERT OR REPLACE INTO stock_info({','.join(keep)}) "
@@ -184,6 +237,7 @@ def build():
         ("daily_rows", str(len(d_rows))),
         ("weekly_rows", str(len(w_rows))),
         ("n_codes", str(len(codes))),
+        *caliber_meta,          # stock_info 权益/股本口径记录（U6 规则③/U3）
     ])
     con.commit()
     con.execute("ANALYZE")
