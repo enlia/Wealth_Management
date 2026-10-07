@@ -195,12 +195,44 @@ def build_panel(codes, factors, start, end) -> dict[str, pd.DataFrame]:
               f"内存 {wide.memory_usage(deep=True).sum()/1e6:.0f}MB")
     out["__price__"] = (pd.concat(price_parts, axis=0)
                         if price_parts else pd.DataFrame())
+    # ⚠️ **重叠日期守护：去重/裁剪必须落在返回值上**。
+    #   旧写法 `p = out["__price__"]; p = p[~p.index.duplicated()]` 只改了
+    #   局部变量 `p`，`out["__price__"]` 仍是含重复日期的旧对象 ——
+    #   保护形同虚设，下游拿到的恰是没被保护的面板。
     p = out["__price__"]
-    if p.index.duplicated().any():
+    dup = p.index.duplicated(keep="first")
+    if dup.any():
         p = p[~p.index.duplicated(keep="last")]
+        print(f"  ⚠ price 拼接片段含 {int(dup.sum())} 个重复日期"
+              f"（跨年重叠），已按 keep='last' 去重为 {len(p):,} 行")
+    # ⚠️ 价格面板与因子面板**同区间裁剪**：两个面板日期轴必须一致。
+    #   因子裁了、price 没裁会让下游 take_along_axis 报 shape mismatch，
+    #   而那个错看起来像 numpy 的问题、实际是取数层两个面板口径不一致。
+    if len(p):
+        p = p.sort_index().loc[
+            (p.index >= pd.Timestamp(f"{y0}0101"))
+            & (p.index <= pd.Timestamp(f"{y1}1231"))]
+    out["__price__"] = p
     print(f"  ✓ {'price':<16} 覆盖率 "
           f"{float(p.notna().mean().mean())*100:5.1f}%  "
           f"内存 {p.memory_usage(deep=True).sum()/1e6:.0f}MB")
+    # ⚠️ **逐个因子**与价格面板比对日期索引（守护的落地校验）：
+    #   只拿第一个因子比，其余因子索引不一致不会被发现；一个因子都没有、
+    #   或价格面板为空时必须抛错，不许静默「对齐通过」。
+    if p.empty:
+        raise ValueError(
+            "价格面板为空 —— 没有价格就没有收益可算，"
+            "禁止以空面板冒充对齐通过")
+    names = [k for k in out if k != "__price__"]
+    if not names:
+        raise ValueError(
+            "没有任何因子面板（逐年因子结果全为空）—— 拒绝以空结果返回")
+    for name in names:
+        if not out[name].index.equals(p.index):
+            raise ValueError(
+                f"因子面板 {name} 与价格面板日期索引不一致："
+                f"{len(out[name].index):,} 行 vs {len(p.index):,} 行 —— "
+                f"两个面板必须同裁剪、同去重")
     return out
 
 

@@ -200,6 +200,35 @@ def load_stock_info(db_path: Path | str = DB_PATH) -> pd.DataFrame:
         return pd.read_sql_query("SELECT * FROM stock_info", con)
 
 
+def load_first_dates(
+    codes: list[str] | None = None,
+    db_path: Path | str = DB_PATH,
+) -> pd.Series:
+    """每个 code 在行情表 ``bar_daily`` 的**首个数据日期**（code 索引）。
+
+    用途：``stock_info.list_date`` 缺失（实测 944/8,728 只，bj920 新号段整段缺）
+    时，该日期是上市日的**下界代理**（首个数据日 ≥ 真实上市日）——
+    拿它计龄是保守口径：数据晚起点的老股会被判新（误杀），
+    但真次新股不会被错放（宁可误杀不可错放次新，250 日保护必须生效）。
+    """
+    sql = "SELECT code, MIN(date) AS d FROM bar_daily"
+    params: list = []
+    if codes is not None:
+        if not codes:
+            return pd.Series(dtype="datetime64[ns]")
+        sql += " WHERE code IN (%s)" % ",".join("?" * len(codes))
+        params.extend(codes)
+    sql += " GROUP BY code"
+    with _connect(db_path) as con:
+        rows = con.execute(sql, params).fetchall()
+    if not rows:
+        return pd.Series(dtype="datetime64[ns]")
+    df = pd.DataFrame(rows, columns=["code", "d"])
+    first = pd.to_datetime(pd.to_numeric(df["d"]).astype("int64").astype("string"),
+                           format="%Y%m%d")
+    return pd.Series(first.to_numpy(), index=df["code"], name="first_date")
+
+
 def load_sectors(db_path: Path | str = DB_PATH) -> pd.DataFrame:
     with _connect(db_path) as con:
         return pd.read_sql_query("SELECT * FROM sector", con)
