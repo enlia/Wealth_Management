@@ -11,7 +11,7 @@
 
 口径三件套（本脚本全部产出的强制列头）
 --------------------------------------
-  价格口径 : 后复权 close_adj / high_adj / low_adj（bd64b99 起）
+  价格口径 : 前复权（qfq）close_adj / high_adj / low_adj（bd64b99 起口径断点）
   换手单位 : 单期换手 = %/交易日（alphalens quantile_turnover(period=1) 分位均值）；
              折年换手 = 单期换手 × 252（倍/年）
   年化方式 : 线性 ×252（spread × 252/periods[0]；年化 = 每期均值倍数换算，
@@ -58,7 +58,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 pd.set_option("display.width", 220)
 
 CALIBER = {
-    "口径_价格": "后复权 *_adj",
+    "口径_价格": "前复权（qfq）*_adj",
     "口径_换手单位": "单期换手=%/交易日（分位均值）；折年=单期×252 倍/年",
     "口径_年化方式": "线性 ×252（每期均值倍数换算）",
 }
