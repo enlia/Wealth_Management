@@ -147,7 +147,7 @@ def main() -> int:
         rng = np.random.default_rng(args.seed)
         if len(codes) > args.n:
             codes = sorted(rng.choice(codes, size=args.n, replace=False))
-    print(f"\n[1/4] 读取 {len(codes):,} 只标的长表（后复权）…")
+    print(f"\n[1/4] 读取 {len(codes):,} 只标的长表（前复权 qfq）…")
     long = load_long(codes, start=cfg.start_date, end=cfg.end_date, adjusted=True)
     if "close_adj" not in long.columns:
         raise RuntimeError("长表缺少 close_adj 列，拒绝在未复权口径上做收益研究")
