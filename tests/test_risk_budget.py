@@ -128,15 +128,26 @@ class TestPositionCaps:
         assert "上限" in out[-1].reason
 
     def test_max_total_caps_portfolio(self):
-        """跨行业多只、每只 4.375% → 第 4 只吃满总仓位额度，第 5 只无额度可建。"""
+        """跨行业 5 只、每只分数凯利 4.375%（=0.25·(0.45·2−0.55)/2）→ 总仓位上限 10% 生效。
+
+        手算（逐笔按 EV 降序裁剪，代码 `contributors` 取 min 并标注真约束名）：
+          第 1 只 min(0.04375, 0.05, 1.0, 0.1000) = 0.04375 → kelly
+          第 2 只 min(0.04375, 0.05, 1.0, 0.05625) = 0.04375 → kelly
+          第 3 只 min(0.04375, 0.05, 1.0, 0.01250) = 0.01250 → **max_total（部分成交，不是 kelly）**
+          第 4/5 只 总剩余 0 → no_room（dropped）
+        ⚠️ 2026-10-07 更正：原断言写 out[:4] 全为 kelly 且第 4 只吃满额度，与逐笔裁剪语义不符
+        （若第 3 只被总上限夹住却标 kelly，就是「裁剪理由错标」＝ CODE_TRUST P23 同类缺陷）。
+        """
         params = RiskParams(max_position=0.05, max_industry=1.0, max_total=0.10)
         inds = ["食品饮料", "电子", "医药生物", "电力设备", "银行"]
         cands = [_cand(f"sh60001{i}", 0.45, inds[i]) for i in range(5)]
         out = apply_portfolio_caps(cands, params)
         assert sum(a.weight for a in out) == pytest.approx(0.10)
-        assert [a.binding for a in out[:4]] == ["kelly"] * 4
-        assert out[4].dropped is True and out[4].binding == "no_room"
-        assert "无法建仓" in out[4].reason
+        assert [a.binding for a in out[:3]] == ["kelly", "kelly", "max_total"]
+        assert out[2].weight == pytest.approx(0.10 - 2 * 0.04375)
+        assert [a.binding for a in out[3:]] == ["no_room", "no_room"]
+        assert all(a.dropped is True and a.weight == 0.0 for a in out[3:])
+        assert "无法建仓" in out[3].reason
 
     def test_ev_ranking_keeps_higher_ev(self):
         """超限时按 EV 从高到低保留：EV 高的先占额度，EV 低的被裁。"""
