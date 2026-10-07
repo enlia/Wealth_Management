@@ -1,7 +1,8 @@
 # 工程规范（Engineering Standards）
 
 > 建立：2026-10-06｜来源：项目所有者明确要求
-> 优先级：**最高**。与 AGENTS.md 其他条目冲突时，以本文件为准。
+> 优先级：**最高**（唯一例外：AGENTS.md「★ 项目目标」节为用户直下目标，位于本文件之上——2026-10-07 登记）。
+> 除 AGENTS.md「★ 项目目标」节（用户直下目标，位于本文件之上）外，与其他条目冲突时以本文件为准。
 > 违反本规范的代码不予合并。
 
 ---
@@ -25,50 +26,60 @@
 
 ---
 
-## 一、Git 工作流：分支 + 评审 + PR 合并
+## 一、Git 工作流：分支 + 评审 + 合入（本地 merge 或 PR）
+
+> ⚠️ **本条明确覆盖 `origin/main` 旧文本**：旧版此处写「### 为什么必须走 GitHub PR」+「**禁止** `git switch main && git merge <分支>` 直接在本地合并」。
+> **2026-10-07 用户直接授权放宽：允许本地直接 merge**（`--no-ff` 保留分支过程）；PR 改为可选路径。
+> 同步 `origin/main` 时该冲突**必须按本条裁决**（不得回退成禁止），否则「以本文件为准」会把授权翻转。
+> 放宽不减免铁律 2：**review 结论必须先落地**（写进分支提交信息或台账）。
 
 ### 强制流程（无例外）
 
 ```
 1. 更新并拉新分支
-   git fetch origin && git switch main && git pull
+   git fetch origin && git switch main && git pull --ff-only
    git switch -c feat-<简述>
 2. 在分支上开发 + 小步提交
 3. 派子 agent 做 review  明确要求它按本文档 + PITFALLS 逐条核对
-4. review 通过后推送      git push -u origin <分支>
-5. 在 GitHub 上开 PR      https://github.com/enlia/Wealth_Management/compare/main...<分支>
-6. PR 合并到 main        gh pr merge <PR号> --merge
+4. 合入 main（两种都允许；2026-10-07 用户放宽「本地直接 merge」）
+   A) 本地 merge：git switch main && git merge --no-ff <分支>
+   B) GitHub PR ：git push -u origin <分支> → 开 PR → gh pr merge <PR号> --merge
    ⚠️ **禁止 --squash**（用户 2026-10-06 明确要求）：
       squash 会把整个分支压成1 个提交，main 历史变成一条直线，
       看不到「从哪拉分支、逐步改了什么」，Git Graph 也不画分叉。
       --merge（--no-ff 语义）会生成 merge commit，
       分支的每个提交都留在 main 历史中，可回溯全过程。
+   ⚠️ 无论 A 还是 B，**review 结论必须先落地**（写进分支提交信息或台账）。
    ⚠️ 本机 gh.exe 在 C:/Program Files/GitHub CLI/，可能不在 PATH：
       "C:/Program Files/GitHub CLI/gh.exe" pr merge 1 --merge
-7. 保留分支              ⚠️ 合并后不删除，保留作历史记录
+5. 保留分支              ⚠️ 合并后不删除，保留作历史记录
 ```
 
-### 为什么必须走 GitHub PR
+### 合入方式：本地 merge 或 GitHub PR（2026-10-07 用户放宽）
 
-| 原因 | 说明 |
+| 方式 | 什么时候用 |
 |---|---|
+| **本地 merge（允许）** | `git switch main && git merge --no-ff <分支>`；省掉 PR 往返。**前提不变**：先过 review 子 agent，review 结论写进分支提交信息或台账（铁律 2 不因放宽而失效） |
+| **GitHub PR** | 需要 CI 拦截 / 远程留档 / 多人协作时用：`gh pr merge <PR号> --merge`；优点见下 |
 | **留痕** | PR 页面永久记录「讨论了什么、改了什么、谁review 的」 |
 | **可追溯** | 出问题能回到任一 PR 看当时的 diff 与评审意见 |
 | **强制 review 留档** | 合并记录里有 review 结论，不依赖对话历史 |
 | **防止误合并** | PR 界面能一眼看出改动范围，比 `git merge` 盲合安全 |
 
-**禁止** `git switch main && git merge <分支>` 直接在本地合并 ——
-这绕过了 PR，评审记录无处存放。
+两种方式都**禁止 `--squash`**（squash 把分支压成 1 个提交，main 历史变直线，
+看不到「从哪拉分支、逐步改了什么」，Git Graph 也不画分叉）。
+
+**唯一硬禁止**：①未经 review 直接 merge ②直推远端 `main`（远端受保护）。
 
 ### 规则
 
 | 规则 | 说明 |
 |---|---|
-| **禁止直推 main** | 任何提交必须先在分支上，经 review + PR |
+| **禁止直推 main** | 任何提交必须先在分支上；经 review 后**本地 merge 或走 PR** 合入 |
 | **分支命名** | `feat-` `fix-` `refactor-` `docs-` + 简述，英文小写连字符 |
-| **合并前必须有 review 结论** | 记录 review 发现了什么、改了什么 |
+| **合并前必须有 review 结论** | 记录 review 发现了什么、改了什么；无 PR 时写进提交信息或台账 |
 | **一个分支一件事** | 不把无关改动混进同一分支 |
-| **合并方式用 `--merge`** | **禁止 `--squash`**。squash 丢失分支过程，Git Graph 无分叉 |
+| **合并方式用 `--merge`（`--no-ff` 语义）** | **禁止 `--squash`**。squash 丢失分支过程，Git Graph 无分叉 |
 | **合并后保留分支** | 不执行 `git branch -d` 与 `git push origin --delete` |
 
 ### 合并后保留分支的依据
@@ -475,7 +486,9 @@ WORKSPACE = Path(r"C:\Documentation\Wealth_Management")
 ## 九、冲突时的优先级
 
 ```
-工程规范（本文件，最高）
+项目目标（AGENTS.md ★ 节，用户直下·最高）
+    ↓
+工程规范（本文件）
     ↓
 金融研究质量红线（AGENTS.md 第二节）
     ↓
