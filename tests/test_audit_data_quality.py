@@ -152,7 +152,7 @@ class TestClassifyResiduals:
 class TestAnnualDragYearSpan:
     """annual_drag 的年数折算钉 ② 层时长兜底口径（243），不许串 ① 层倍数换算口径（252）。
 
-    年化三层口径（判例真源 PITFALLS P10「年化三层口径裁决」）：
+    年化三层口径（摘列；判例真源 PITFALLS P10「年化三层口径裁决」）：
       ① 倍数换算 ×252（把每期比率放大到年频）；
       ② 时长兜底 ÷243（无日期索引输入，交易日数折年数 —— annual_drag 属此层）；
       ③ 有日期年跨越 ÷365.25 自然日。
