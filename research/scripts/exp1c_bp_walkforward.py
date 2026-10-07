@@ -47,7 +47,7 @@ sys.path.insert(0, str(ROOT / "research" / "scripts"))
 import build_financial_panel as fin_panel  # noqa: E402
 from financial_factors import build_financial_factors, neutralize  # noqa: E402
 from run_long_only import _bench_stats, _cross_z  # noqa: E402
-from run_size_decile import _run_sub, load_circ_mv  # noqa: E402
+from run_size_decile import _run_sub  # noqa: E402
 
 from factor_lab.analysis.long_only import CostModel, PortfolioSpec, build_long_only  # noqa: E402
 from factor_lab.analysis.walk_forward import WindowSpec, judge, make_windows  # noqa: E402
@@ -75,6 +75,23 @@ N_TRIALS = 13          # 3（本批）+ 10 族历史出线 on-record（简报实
 
 
 # ── 1. 披露日历（新判据代码；测试见 tests/test_exp1c_disclosure.py）──
+def _ymd(s: pd.Series) -> pd.Series:
+    """数值/字符串两态 YYYYMMDD → Timestamp；解析失败 = NaT（不静默给默认值）。
+
+    ⚠️ ts_ 表日期列实测为**数值型**（如 20240331 整数），直接
+       `to_datetime(format="%Y%m%d")` 会全部 coerce 成 NaT 再被 dropna 光——
+       表现为 join 0 行、级联 100% 落兜底的假象（空结果 ≠ 真没有）。
+    """
+    def _one(v):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return None
+        try:
+            return f"{int(float(v)):08d}"
+        except (TypeError, ValueError):
+            return None                      # 坏值 → NaT（显式缺失，不静默补值）
+    return pd.to_datetime(s.map(_one), format="%Y%m%d", errors="coerce")
+
+
 def load_disclosure_dates() -> pd.DataFrame:
     """从 market.db 只读取（sym/报告期）→（最早披露 f_ann_date、登记日 ann_date）。
 
@@ -93,17 +110,29 @@ def load_disclosure_dates() -> pd.DataFrame:
     d = pd.read_sql_query(q, con)
     con.close()
     d.columns = ["ts_code", "end_date", "opdate", "regdate"]
-    for c in ("opdate", "regdate"):
-        d[c] = pd.to_datetime(d[c], format="%Y%m%d", errors="coerce")
-    d["end_date"] = pd.to_datetime(d["end_date"], format="%Y%m%d", errors="coerce")
+    for c in ("opdate", "regdate", "end_date"):
+        d[c] = _ymd(d[c])
     d["sym"] = d["ts_code"].map(_ts_to_local)
-    return d.dropna(subset=["sym", "end_date"])
+    out = d.dropna(subset=["sym", "end_date"])
+    if out.empty:
+        raise RuntimeError(
+            "ts_ 披露日 join 表为空 —— 查询或日期解析失效（空结果 ≠ 真没有，"
+            "检验框架铁律·二·通用防线）。先对拍 ts_income 行数再放行。")
+    return out
 
 
 def _ts_to_local(ts: str) -> str | None:
-    code6, _, mkt = str(ts).partition(".")
-    prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(mkt)
-    return prefix + code6 if prefix else None
+    """双态代码收敛：库内 ts_ 表实测为**前缀形**（bj920000/sh600519），
+    tushare 原始形为**后缀形**（920000.BJ）。前缀形直通；后缀形复用现成
+    tradability.tushare_to_local_code（其契约=后缀形，传前缀形会 raise，故不可直替）。
+    """
+    from factor_lab.analysis.tradability import tushare_to_local_code
+    s = str(ts).strip().lower()
+    if len(s) == 8 and s[:2] in ("sh", "sz", "bj") and s[2:].isdigit():
+        return s
+    if "." in s:
+        return str(tushare_to_local_code(pd.Series([str(ts).strip()])).iloc[0])
+    return None
 
 
 def apply_disclosure_calendar(panel: pd.DataFrame, disc: pd.DataFrame,
@@ -350,7 +379,16 @@ def main() -> int:
             te = [d for d in dates if s <= str(d.date()) <= e]
             sp = PortfolioSpec(name=f"{f}-{seg}", n_hold=30, n_pick=90,
                                rebalance="M", factor=f)
-            r = build_long_only(z.loc[te], sp, cost, px_adj.loc[te])
+            try:
+                r = build_long_only(z.loc[te], sp, cost, px_adj.loc[te])
+            except (ValueError, RuntimeError) as ex:
+                # ⚠️ 权重上限可行性边界：有效槽位 < ceil(1/max_weight)=7 时
+                #    [min_weight, max_weight] 内凑不出 1（构造性不可行，非 bug）。
+                #    小样本冒烟会撞上；显式记失败行，不静默跳过。
+                seg_rows.append({"因子": f, "子区间": seg, "净": np.nan,
+                                 "毛": np.nan, "换手": np.nan,
+                                 "状态": f"显式失败（权重上限可行性）: {ex}"[:120]})
+                continue
             seg_rows.append({"因子": f, "子区间": seg,
                              "净": r.get("年化收益", np.nan),
                              "毛": r.get("年化毛收益", np.nan),
@@ -363,7 +401,9 @@ def main() -> int:
 
     # ── 市值层内混淆（现成 run_size_decile 口径：te[-1] 三分层）──
     print("\n[市值层内混淆]" + TAG)
-    mcap = load_circ_mv(args.start, args.end)
+    import run_size_decile as _sd
+    _sd.ROOT = WM_ROOT          # daily_basic.parquet 产物定位于主工作区 runtime
+    mcap = _sd.load_circ_mv(args.start, args.end)
     lay_rows = []
     for f in names:
         z = _cross_z(wide[f])

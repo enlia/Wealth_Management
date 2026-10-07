@@ -36,6 +36,25 @@ _DISC = pd.DataFrame({
 
 
 class Test披露日历级联:
+    def test_ymd必须认数值型日期且坏值为NaT(self):
+        """ts_ 表日期列是数值型（20240331 整数）——按字符串 to_datetime 会全体
+        coerce NaT 而被 dropna 光（join 0 行、级联 100% 落兜底的假象）。"""
+        from exp1c_bp_walkforward import _ymd
+        got = _ymd(pd.Series([20240331, 20241231.0, None, "garbage"]))
+        assert got.iloc[0] == pd.Timestamp("2024-03-31")
+        assert got.iloc[1] == pd.Timestamp("2024-12-31")
+        assert pd.isna(got.iloc[2])
+        assert pd.isna(got.iloc[3]), "坏值必须显式 NaT，不得静默给默认日期"
+
+    def test_ts_to_local双态映射(self):
+        """库内 ts_ 表实测为前缀形（bj920000），tushare 原始形为后缀形
+        （920000.BJ）——两态都须落到本机口径，漏一态会让 join 全空。"""
+        from exp1c_bp_walkforward import _ts_to_local
+        assert _ts_to_local("sh600519") == "sh600519"      # 前缀形直通
+        assert _ts_to_local("600519.SH") == "sh600519"     # 后缀形走现成映射
+        assert _ts_to_local("920680.BJ") == "bj920680"
+        assert _ts_to_local("garbage") is None, "垃圾值必须显式 None（→被 dropna）"
+
     def test_cascade逐级延顺_op优先于reg再兜底80日(self):
         """级联已知真值（算式可复核，+1 日）：
         sh600000 有 opdate 04-10 ⇒ 04-11（虽 regdate 04-15 更晚不采）
