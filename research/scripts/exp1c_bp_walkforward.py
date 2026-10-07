@@ -458,7 +458,7 @@ def main() -> int:
             "成本模型": {k: str(v) for k, v in COSTS.items()},
             "窗口卫生": hyg, "耗时s": round(time.perf_counter() - t0, 1),
             "口径三件套": {
-                "价格口径": "因子用未复权 close（bps 同口径）；收益用 load_factor_prices:adj（DB 字段 close_adj，代码注释标『前复权』、真源 AGENTS 九.5 标后复权——以 DB 真源为准记后复权）",
+                "价格口径": "因子用未复权 close（bps 同口径）；收益用 load_factor_prices:adj（DB 字段 close_adj，以 DB 真源为准记前复权（qfq）——adj/close 归一锚 0.793056→1.000000@末日（案 15 U3 反推定案）；AGENTS 九·5 旧标『后复权』经九·7 命名勘误）",
                 "换手单位": "月频调仓的单边换手率均值（engine.simulate_matrix 口径）",
                 "年化方式": "自然日跨度 ÷ 365.25（_year_span ③ 层）几何年化；倍数换算 ×252（① 层）"}}
     (OUT / f"meta_{args.mode}.json").write_text(
