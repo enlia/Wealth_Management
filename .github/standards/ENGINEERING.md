@@ -56,11 +56,11 @@
 7. 保留分支              ⚠️ 合并后不删除，保留作历史记录
 ```
 
-### 合入方式：本地 merge 或 GitHub PR（2026-10-07 用户放宽）
+### 合入方式：直推 main（2026-10-07 用户二度放宽：不走 PR/CI；review 不省）
 
 | 方式 | 什么时候用 |
 |---|---|
-| **本地 merge（允许）** | `git switch main && git merge --no-ff <分支>`；省掉 PR 往返。**前提不变**：先过 review 子 agent，review 结论写进分支提交信息或台账（铁律 2 不因放宽而失效） |
+PLACEHOLDER_KEEP
 | **GitHub PR** | 需要 CI 拦截 / 远程留档 / 多人协作时用：`gh pr merge <PR号> --merge`；优点见下 |
 | **留痕** | PR 页面永久记录「讨论了什么、改了什么、谁review 的」 |
 | **可追溯** | 出问题能回到任一 PR 看当时的 diff 与评审意见 |
@@ -70,13 +70,13 @@
 两种方式都**禁止 `--squash`**（squash 把分支压成 1 个提交，main 历史变直线，
 看不到「从哪拉分支、逐步改了什么」，Git Graph 也不画分叉）。
 
-**唯一硬禁止**：①未经 review 直接 merge ②直推远端 `main`（远端受保护）。
+**唯一硬禁止**：①**未经 review 直接合入** ②`--squash` ③把 CI 绿灯当作 review 的替代（CI 已不作门槛）。**直推 main 的前置三件**：独立 review 子 agent 结论 + 本地全量 pytest 数字 + 提交信息写明 review 结论。
 
 ### 规则
 
 | 规则 | 说明 |
 |---|---|
-| **禁止直推 main** | 任何提交必须先在分支上；经 review 后**本地 merge 或走 PR** 合入 |
+| **直推 main 允许（2026-10-07 起）** | 直推前必备：①独立 review 子 agent 结论 ②本地全量 pytest 通过 ③提交信息写明 review 结论；禁止 --squash |
 | **分支命名** | `feat-` `fix-` `refactor-` `docs-` + 简述，英文小写连字符 |
 | **合并前必须有 review 结论** | 记录 review 发现了什么、改了什么；无 PR 时写进提交信息或台账 |
 | **一个分支一件事** | 不把无关改动混进同一分支 |
