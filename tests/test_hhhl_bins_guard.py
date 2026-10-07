@@ -136,7 +136,7 @@ class Test修复版必过:
 class Test还原bug版必失败:
     """还原 bug 版（不分箱 / 旧 zero_aware 处方）必须 FAILED —— 新守护要"咬人"。
 
-    复现的是 bd64b99 之前的真实失败形态：横截面 3 取值进 5 等频分位，
+    复现的是 c18fdc9 之前的真实失败形态：横截面 3 取值进 5 等频分位，
     分箱丢样本超 max_loss ⇒ MaxLossExceededError（显式报错，不静默出数）。
     """
 

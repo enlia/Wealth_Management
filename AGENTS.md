@@ -163,7 +163,7 @@ from joblib import Parallel, delayed     # pyproject.toml 里没声明
 | 财务数据接口                    | **akshare** 新浪源               | 实测可用；东财源被代理拦截                                     |
 | 可转债/可交换债                 | **Ashare**                       | 注意无许可证，仅读源码不拷代码                                 |
 
-> ⚠️ **2026-10-13 实测勘误**：`mlfinlab` 三行（bet_sizing / cross_validation / backtest_statistics）**本机不可用**——`find_spec('mlfinlab')` 实测 None（商用许可受限、未安装）。相关能力走「论文公式自实现」路径：Deflated Sharpe **已实现但未合入 main**——`src/factor_lab/analysis/deflated.py`（80 行，Bailey & López de Prado 2014 公式、边界显式抛错）+ `tests/test_deflated_sharpe.py` 存在于分支 **`experiment/round1a-low-turnover`（提交 `f1726b6`）**；**2026-10-07 实测：工作树/HEAD 无此文件、该分支有——两条并存不矛盾，勿据此重实现**（此前一版写成「误记/自称」是反向错判，已更正）；bet_sizing / purged-CV 同径。**"可直接用"必须按 P8 实测口径核装载可行性**，复用表条目也会老化。
+> ⚠️ **2026-10-13 实测勘误**：`mlfinlab` 三行（bet_sizing / cross_validation / backtest_statistics）**本机不可用**——`find_spec('mlfinlab')` 实测 None（商用许可受限、未安装）。相关能力走「论文公式自实现」路径：Deflated Sharpe **已随 `experiment/round1a-low-turnover` 合入 main**（2026-10-07 本地 merge；实现提交 `a2e7cc5`（重写前名 `f1726b6`））——`src/factor_lab/analysis/deflated.py`（80 行，Bailey & López de Prado 2014 公式、边界显式抛错）+ `tests/test_deflated_sharpe.py` **现已在 main 工作树内**（`Test-Path` 实测 True）；bet_sizing / purged-CV 同径待做。**"可直接用"必须按 P8 实测口径核装载可行性**，复用表条目也会老化。
 
 ---
 
@@ -435,7 +435,7 @@ Wealth_Management/
 **2026-10-03** 在**多空 IC 口径**下的判定；**2026-10-06** 的滚动样本外检验（7 个互不重叠窗口）
 + 市值分层混淆检验把它推翻——rev5 的正收益主要来自**小盘市值暴露**，不是反转信号，**判定不可用**。
 证据：`research/scripts/run_walk_forward.py`、`research/scripts/run_size_decile.py`；
-`docs/01_参考资料/因子计算明细与失效诊断.md:198-235`；git `b2bb7bb`（混淆检验）、`9204b37`（口径修正）。
+`docs/01_参考资料/因子计算明细与失效诊断.md:198-235`；git `7675007`（混淆检验）、`e75d7e7`（口径修正）。
 
 1. **rev5 判定不可用——收益来自市值暴露**【实测已核】
    全市场 5,606 只 × 7 滚动窗口；按历史时点流通市值（`daily_basic.circ_mv`，1,118 万行）三层
@@ -479,7 +479,7 @@ Wealth_Management/
 
 1. ~~修 hhhl20（离散取值因子需 zero_aware=True）~~ **处方已作废（2026-10-13 逐 diff 实证更正）**：
    hh_hl_score 取值恒 {0,1,2}（price_volume.py:206），无负半区、zero_aware 数学上不成立；
-   正解=等宽分箱 bins=3，**bd64b99 已实装**。实验轮 B 线相应改为"分箱复测验证"（还原 bug 版必失败守护 + 三段子区间）。
+   正解=等宽分箱 bins=3，**c18fdc9 已实装**。实验轮 B 线相应改为"分箱复测验证"（还原 bug 版必失败守护 + 三段子区间）。
    尾巴 2 条：同函数 docstring"取值 {-1,0,1,2}"（:192）与实现不符（P23 残留，待更正）；
    DISCRETE_FACTORS 登记靠自觉，新离散因子漏登记会退 quantiles 路径（运行时显式 MaxLossExceededError，不静默）。
 2. 财务因子（现金流量表等财务四表已补齐至 5,591 只【2026-10-07 实测】，数据已就绪；按检验框架铁律先过滚动复核）
@@ -502,6 +502,13 @@ Wealth_Management/
 | rev5 类短期反转的表面收益**主要来自小盘市值暴露**；分层场景必须用**层内基准**【实测已核】 | 本项目实测（run_size_decile.py，见七·推翻记录） |
 | 11 个价量因子单边多头全跑输小盘等权基准、多空扣成本后 0/11 为正【实测已核】             | 本项目实测（run_walk_forward.py / docs/03 12 号报告） |
 
+## 八·附：提交 SHA 的重写说明（2026-10-07）
+本仓 2026-10-07 依用户指令「git 历史必须干净」执行了全历史重写（filter-repo 四操作），**所有提交 SHA 改变**。
+本文件（及 docs/results 下的引用）已按新名更新；**旧名 → 新名对照见**
+`.planning/reports/history-purge-sha-map-2026-10-07.md`（含 3 个已不可追溯的旧 SHA 的如实披露）。
+文件名中内嵌的旧 SHA（如 `verify-bd64b99-message.md`、`review-retro-2e5c653-2357b79.md`）**故意保持原样**，
+以免断链；引用时按「文件名原样 + 提交用新名」处理。
+
 ## 九、口径声明（写报告时必须附带）
 
 1. 本项目所有「多空收益」都是**多空组合**口径（做多高分位 + 做空低分位）。
@@ -509,11 +516,11 @@ Wealth_Management/
 2. 股票池基于**当前**数据库构建，无法回溯已退市/暂停上市股票 → 幸存者偏差。
 3. 市值中性化用的 shares 来自**当前快照**，不是历史股本 → 不无偏。
 4. 检验多个因子时**未做多重比较校正**，IC 最大值会系统性偏高。
-5. **收益口径历史断点（2026-10-13 逐 diff 实证补录）**：bd64b99 起因子计算改用**后复权价**（close/high/low → \*_adj），
+5. **收益口径历史断点（2026-10-13 逐 diff 实证补录）**：c18fdc9 起因子计算改用**后复权价**（close/high/low → \*_adj），
    该提交的变更清单未声明此口径变化——**2026-10-06 前后的产出数字不可直接对比**，跨断点比较必须重算或注明口径。
-   详见 `.planning/reports/verify-bd64b99-message.md` 披露草稿（【实测已核】）。
+   详见 `.planning/reports/verify-bd64b99-message.md`（文件名保持原状，未随重写改名） 披露草稿（【实测已核】）。
 6. **第二口径断点：股票池入窗裁剪（2026-10-13 补审查实证）**：2026-10-06 10:50 前经 `build_universe`
-   的产出带**"每股入窗头 250 交易日被裁"**口径（2357b79 的哨兵死代码所致，P22 同构：NaN 被换成真实位置 0）——
+   的产出带**"每股入窗头 250 交易日被裁"**口径（7982e8e 的哨兵死代码所致，P22 同构：NaN 被换成真实位置 0）——
    本文件 2026-10-03 四因子表（rev5 49.4% 换手等）与 P13 三段表等**断点前数字需复算或标注断点**；
    报告 12（2026-10-06 12:29 后产出）、P15 23 因子表、walk-forward 系**不受牵连**。
    详见 `.planning/reports/review-retro-2e5c653-2357b79.md`（【实测已核】）。
@@ -554,7 +561,7 @@ GPU   NVIDIA GeForce RTX 4060 Laptop GPU
 - CPU/内存侧结论不变：全市场宽表（5,185 只 × 2,611 日 ≈ 1 GB）可承载，但可用内存只剩 ~5.3 GB，
   并行度需留余量；中性化 joblib 线程池（n_jobs = 逻辑核/2 = 8）实测加速 3.14x。
 
-**待更正（仍在写「无 GPU」的文档，改前不得据其排除深度学习路线）**：
+**「无 GPU」陈旧表述已全部更正（2026-10-07 办结）**——下列 4 份文档共 10 处已改，且实测口径统一为「有 RTX 4060 Laptop 8 GB + CUDA torch 就绪；8 GB 是硬上限」：
 `docs/02_方法与结论/04_量化算法方案清单与落地路线.md`（:6、:7、:66、:232、:249）、
 `docs/02_方法与结论/05_非深度学习路线性能突破报告.md`（:4、:136）、
 `docs/03_项目报告/06_选股能力实测与使用指南.md`（:6）、
