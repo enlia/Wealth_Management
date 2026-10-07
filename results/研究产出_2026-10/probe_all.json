@@ -1,0 +1,491 @@
+{
+  "adj_factor": {
+    "desc": "复权因子",
+    "class": "P0",
+    "scale": "5,591 只 × 全历史",
+    "ok": true,
+    "rows": 6000,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "adj_factor"
+    ],
+    "elapsed": 0.32
+  },
+  "daily_basic": {
+    "desc": "每日指标(PE/PB/市值/换手)",
+    "class": "P0",
+    "scale": "全市场日频，量最大",
+    "ok": true,
+    "rows": 21,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "close",
+      "turnover_rate",
+      "turnover_rate_f",
+      "volume_ratio",
+      "pe",
+      "pe_ttm",
+      "pb",
+      "ps",
+      "ps_ttm",
+      "dv_ratio"
+    ],
+    "elapsed": 0.1
+  },
+  "fina_indicator": {
+    "desc": "财务指标(ROE/毛利率/负债率)",
+    "class": "P0",
+    "scale": "5,591 只 × 8 季",
+    "ok": true,
+    "rows": 100,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "eps",
+      "dt_eps",
+      "total_revenue_ps",
+      "revenue_ps",
+      "capital_rese_ps",
+      "surplus_rese_ps",
+      "undist_profit_ps",
+      "extra_item",
+      "profit_dedt"
+    ],
+    "elapsed": 0.2
+  },
+  "income": {
+    "desc": "利润表",
+    "class": "P0",
+    "scale": "5,591 只 × 全期",
+    "ok": true,
+    "rows": 119,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "f_ann_date",
+      "end_date",
+      "report_type",
+      "comp_type",
+      "end_type",
+      "basic_eps",
+      "diluted_eps",
+      "total_revenue",
+      "revenue",
+      "int_income"
+    ],
+    "elapsed": 0.18
+  },
+  "balancesheet": {
+    "desc": "资产负债表",
+    "class": "P0",
+    "scale": "5,591 只 × 全期",
+    "ok": true,
+    "rows": 100,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "f_ann_date",
+      "end_date",
+      "report_type",
+      "comp_type",
+      "end_type",
+      "total_share",
+      "cap_rese",
+      "undistr_porfit",
+      "surplus_rese",
+      "special_rese"
+    ],
+    "elapsed": 0.18
+  },
+  "cashflow": {
+    "desc": "现金流量表",
+    "class": "P0",
+    "scale": "5,591 只 × 全期",
+    "ok": true,
+    "rows": 98,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "f_ann_date",
+      "end_date",
+      "comp_type",
+      "report_type",
+      "end_type",
+      "net_profit",
+      "finan_exp",
+      "c_fr_sale_sg",
+      "recp_tax_rends",
+      "n_depos_incr_fi"
+    ],
+    "elapsed": 0.18
+  },
+  "daily": {
+    "desc": "日线(含复权价)",
+    "class": "P1",
+    "scale": "可替代本机未复权数据",
+    "ok": true,
+    "rows": 21,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "open",
+      "high",
+      "low",
+      "close",
+      "pre_close",
+      "change",
+      "pct_chg",
+      "vol",
+      "amount"
+    ],
+    "elapsed": 0.1
+  },
+  "index_weight": {
+    "desc": "指数成分权重",
+    "class": "P1",
+    "scale": "沪深300 每月",
+    "ok": true,
+    "rows": 2700,
+    "cols": [
+      "index_code",
+      "con_code",
+      "trade_date",
+      "weight"
+    ],
+    "elapsed": 0.18
+  },
+  "index_daily": {
+    "desc": "指数日线",
+    "class": "P1",
+    "scale": "宽基指数行情",
+    "ok": true,
+    "rows": 181,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "close",
+      "open",
+      "high",
+      "low",
+      "pre_close",
+      "change",
+      "pct_chg",
+      "vol",
+      "amount"
+    ],
+    "elapsed": 0.18
+  },
+  "stk_limit": {
+    "desc": "涨跌停价格",
+    "class": "P1",
+    "scale": "涨跌停因子必需",
+    "ok": true,
+    "rows": 21,
+    "cols": [
+      "trade_date",
+      "ts_code",
+      "up_limit",
+      "down_limit"
+    ],
+    "elapsed": 0.09
+  },
+  "suspend_d": {
+    "desc": "停复牌信息",
+    "class": "P1",
+    "scale": "停牌日处理",
+    "ok": false,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "suspend_timing",
+      "suspend_type"
+    ],
+    "elapsed": 0.07
+  },
+  "stock_basic": {
+    "desc": "股票列表",
+    "class": "P2",
+    "scale": "全市场 L/D/P 三态",
+    "ok": true,
+    "rows": 5572,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "name",
+      "area",
+      "industry",
+      "cnspell",
+      "market",
+      "list_date",
+      "act_name",
+      "act_ent_type"
+    ],
+    "elapsed": 0.31
+  },
+  "trade_cal": {
+    "desc": "交易日历",
+    "class": "P2",
+    "scale": "全年",
+    "ok": true,
+    "rows": 365,
+    "cols": [
+      "exchange",
+      "cal_date",
+      "is_open",
+      "pretrade_date"
+    ],
+    "elapsed": 0.11
+  },
+  "namechange": {
+    "desc": "更名记录",
+    "class": "P2",
+    "scale": "变更历史",
+    "ok": true,
+    "rows": 3,
+    "cols": [
+      "ts_code",
+      "name",
+      "start_date",
+      "end_date",
+      "ann_date",
+      "change_reason"
+    ],
+    "elapsed": 0.11
+  },
+  "index_classify": {
+    "desc": "指数分类(申万)",
+    "class": "P2",
+    "scale": "31 个",
+    "ok": true,
+    "rows": 31,
+    "cols": [
+      "index_code",
+      "industry_name",
+      "level",
+      "industry_code",
+      "is_pub",
+      "parent_code",
+      "src"
+    ],
+    "elapsed": 0.07
+  },
+  "index_member_all": {
+    "desc": "指数成分(全)",
+    "class": "P2",
+    "scale": "5,591 只",
+    "ok": true,
+    "rows": 1,
+    "cols": [
+      "l1_code",
+      "l1_name",
+      "l2_code",
+      "l2_name",
+      "l3_code",
+      "l3_name",
+      "ts_code",
+      "name",
+      "in_date",
+      "out_date",
+      "is_new"
+    ],
+    "elapsed": 0.09
+  },
+  "hs_const": {
+    "desc": "沪深港通成分",
+    "class": "P2",
+    "scale": "A股标的",
+    "ok": true,
+    "rows": 581,
+    "cols": [
+      "ts_code",
+      "hs_type",
+      "in_date",
+      "out_date",
+      "is_new"
+    ],
+    "elapsed": 0.12
+  },
+  "top_list": {
+    "desc": "龙虎榜",
+    "class": "P2",
+    "scale": "每日",
+    "ok": false,
+    "rows": 0,
+    "cols": [
+      "trade_date",
+      "ts_code",
+      "name",
+      "close",
+      "pct_change",
+      "turnover_rate",
+      "amount",
+      "l_sell",
+      "l_buy",
+      "l_amount",
+      "net_amount",
+      "net_rate"
+    ],
+    "elapsed": 0.1
+  },
+  "moneyflow": {
+    "desc": "资金流向",
+    "class": "P2",
+    "scale": "全市场日频",
+    "ok": true,
+    "rows": 21,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "buy_sm_vol",
+      "buy_sm_amount",
+      "sell_sm_vol",
+      "sell_sm_amount",
+      "buy_md_vol",
+      "buy_md_amount",
+      "sell_md_vol",
+      "sell_md_amount",
+      "buy_lg_vol",
+      "buy_lg_amount"
+    ],
+    "elapsed": 0.09
+  },
+  "bak_daily": {
+    "desc": "日线备份",
+    "class": "P3",
+    "scale": "—",
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "elapsed": 0.07,
+    "error": "PermissionError: bak_daily: 抱歉，您没有接口(bak_daily)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。"
+  },
+  "cyq_perf": {
+    "desc": "筹码分布",
+    "class": "P3",
+    "scale": "—",
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "elapsed": 0.08,
+    "error": "PermissionError: cyq_perf: 抱歉，您没有接口(cyq_perf)访问权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。"
+  },
+  "forecast": {
+    "desc": "业绩预告",
+    "class": "P3",
+    "scale": "—",
+    "ok": true,
+    "rows": 22,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "type",
+      "p_change_min",
+      "p_change_max",
+      "net_profit_min",
+      "net_profit_max",
+      "last_parent_net",
+      "first_ann_date",
+      "summary",
+      "change_reason"
+    ],
+    "elapsed": 0.11
+  },
+  "express": {
+    "desc": "业绩快报",
+    "class": "P3",
+    "scale": "—",
+    "ok": true,
+    "rows": 3,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "revenue",
+      "operate_profit",
+      "total_profit",
+      "n_income",
+      "total_assets",
+      "total_hldr_eqy_exc_min_int",
+      "diluted_eps",
+      "diluted_roe",
+      "yoy_net_profit"
+    ],
+    "elapsed": 0.07
+  },
+  "fina_mainbz": {
+    "desc": "主营构成",
+    "class": "P3",
+    "scale": "—",
+    "ok": true,
+    "rows": 150,
+    "cols": [
+      "ts_code",
+      "end_date",
+      "bz_item",
+      "bz_code",
+      "bz_sales",
+      "bz_profit",
+      "bz_cost",
+      "curr_type"
+    ],
+    "elapsed": 0.08
+  },
+  "report_rc": {
+    "desc": "研报评级",
+    "class": "P3",
+    "scale": "—",
+    "ok": true,
+    "rows": 5000,
+    "cols": [
+      "ts_code",
+      "name",
+      "report_date",
+      "report_title",
+      "report_type",
+      "classify",
+      "org_name",
+      "author_name",
+      "quarter",
+      "op_rt",
+      "op_pr",
+      "tp"
+    ],
+    "elapsed": 0.36
+  },
+  "stk_holdernumber": {
+    "desc": "股东人数",
+    "class": "P3",
+    "scale": "—",
+    "ok": true,
+    "rows": 107,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "holder_num"
+    ],
+    "elapsed": 0.08
+  },
+  "pledge_stat": {
+    "desc": "股权质押",
+    "class": "P3",
+    "scale": "—",
+    "ok": true,
+    "rows": 609,
+    "cols": [
+      "ts_code",
+      "end_date",
+      "pledge_count",
+      "unrest_pledge",
+      "rest_pledge",
+      "total_share",
+      "pledge_ratio"
+    ],
+    "elapsed": 0.13
+  }
+}
