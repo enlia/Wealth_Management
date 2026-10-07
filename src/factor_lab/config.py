@@ -210,6 +210,35 @@ def to_wan(yi_value):
     return v * YI_TO_WAN
 
 
+# ── 年化换算常量（PITFALLS.md P10「（1·补）年化三层口径裁决」）──────────
+# 年化换算按语义分三层、各有常数，勿一刀切（层间串用会出结论级偏差）：
+#   ① 倍数换算（每期→年化 ×252/periods、σ 年化 × √252、成本 × 252）
+#      = SCALING_TRADING_DAYS。出处：PITFALLS P10（1·补）①层及其钉死公式
+#        `gross = spread * (252 / periods[0])`。
+#   ② 时长换算兜底（无日期索引输入：交易日数 ÷ 年均交易日）
+#      = YEAR_TRADING_DAYS。出处：PITFALLS P10（1·补）②层，
+#        A 股实测算式 2,611 交易日 ÷ 10.75 历年 = 242.9 ≈ 243。
+#   ③ 有日期的年跨越 = 自然日 365.25（analysis.long_only._year_span 主路径），
+#      不设常量，维护时勿并入上两层。
+# 引用规则：src/ 与 research/ 下的年化换算一律引本处，不写 252/243/244 字面值；
+# 本处是这些年化换算常数的唯一出处（对账守护见 tests/test_annualization.py）。
+#
+# σ 年化偏差备忘（历史形态修正记录，2026-10-07）：曾有 5 个 σ 年化表达式写
+# × √244（① 层应为 √252）。修正比 = √252/√244 ≈ 1.0163，即修正后 = 修正前
+# × 1.0163（修正前的原始波动率数值偏低约 1.63%）；z 标准化截面排序零影响。
+# 已统一改 × √SCALING_TRADING_DAYS。实现点
+# （函数名+锚点；文件:行对照见 07_知识与文献/因子计算明细与失效诊断.md 的
+# σ 年化偏差备忘，含修正前行号）：
+#   · src/factor_lab/factors/price_volume.py —— volatility() 的
+#     `if annualize:` 分支乘数、downside_volatility() 末行 _mk 乘数
+#     （同函数 volatility() docstring「默认年化（×√244）」句同步更正）
+#   · src/tools/tdx.py —— indicators() 输出键「年化波动率%」的乘数
+#   · src/tools/bench_factor.py —— feat() 的 vol60 行
+#   · src/tools/build_universe.py —— load_tech() 构表键「年化波动率%」的乘数
+#     （同句 iloc[-244:] 是回看窗口长度，不是年化常数，勿随本备忘改写）
+SCALING_TRADING_DAYS = 252   # ① 倍数换算；σ 年化取 ×√SCALING_TRADING_DAYS
+YEAR_TRADING_DAYS = 243      # ② 时长换算兜底：年均交易日（仅无日期索引输入）
+
 
 # ── 交易成本假设（A股实际水平）────────────────────────────────
 @dataclass(frozen=True)
@@ -365,6 +394,15 @@ def is_a_share(code: str) -> bool:
 
 
 def is_b_share(code: str) -> bool:
-    """B 股：沪 900xxx / 深 200xxx，价格系数 0.001。"""
+    """B 股：沪 900xxx / 深 200xxx / 201xxx / 202xxx。
+
+    ⚠️ 深 B 的 **201 段曾漏判**（2026-10-13 封板补完单实测）：
+       sz201872「招港B」在旧版（只判 900/200）判不出 B 股 → 落进「其他品种」，
+       UNITS U7 连坐约 242 格/年跌停侧假封。201 段实证存在（sz201872），
+       202 段无实例（段族归一，异例由 G4 门兜底）。
+    ⚠️ **深 B 与沪 B 价格系数不同纲**（UNITS U7）：沪 B(900) ×0.001、
+       深 B(200/201/202) ×0.01 —— 本判定与 ``tdx.price_scale`` 深 B 分支
+       逐码同义（跨面一致守护见 tests/test_units_g4_identity.py）。
+    """
     _, c = _split(code)
-    return c.startswith(("900", "200"))
+    return c.startswith(("900", "200", "201", "202"))
