@@ -123,3 +123,31 @@ class Test分组同义对拍:
         assert g4_group("sh113050") == "基金/债"
         assert g4_group("sz000001") == "A股等"
         assert g4_group("sh600519") == "A股等"
+
+
+class Test全缺组UNKNOWN契约:
+    """组形态 UNKNOWN 契约（设定四件套之「描述 + 测试」件）：
+
+    全缺组（无有效行）→ median=None、verdict="unknown"、深 B 告警="UNKNOWN"，
+    **不填 0 不冒算**（units_probes.g4_identity_report 的 else 分支实现对，
+    本用例把 docstring 契约钉成断言 —— 后人把 else 分支改填 0 或「ok」必 FAILED）。
+    """
+
+    def test_全缺组UNKNOWN禁填空_契约(self) -> None:
+        r = g4_identity_report(rows(
+            ("sz200011", 0.0, 10000.0, 1.0),      # 深 B 全缺值形态四行
+            ("sz200012", 0.0, 10000.0, 1.0),
+            ("sz200017", None, 1.0, 1.0),
+            ("sz200488", 0.0, 0.0, 1.0),
+        ))
+        g = r["groups"]["深B"]
+        assert g["n_valid"] == 0 and g["n_unknown"] == 4
+        assert g["median"] is None               # UNKNOWN 禁填 0
+        assert g["verdict"] == "unknown"         # 全缺组不判 ok / suspect
+        assert r["sz_b_alert"] == "UNKNOWN"      # 组不可检：不猜、不报
+
+
+# ── 还原必败变异记账（独立三文件全集口径，2026-10-13 实测）【发布待双闸】──
+# 阈值哑化（_G4_HIGH / _G4_LOW 改宽）= 8 红：本文件 2 + test_units_g4_identity 2
+#   + test_sz_b_close_scale 4；深 B 并组（g4_group 深B→A股等）= 4 红。
+# 早前提交所记 6 / 3 系两文件叠加差集口径，以本独立口径为准。
