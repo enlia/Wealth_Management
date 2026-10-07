@@ -73,6 +73,7 @@ class TestIsAShare:
             "sh900901",   # B股（sh 900xxx）
             "sz399001",   # 指数
             "sz200011",   # B股（sz 200xxx）
+            "sz201872",   # B股（sz 201 段，招港B——旧版漏判）
             "sh510300",   # ETF
             "sh113050",   # 可转债
             "bj899050",   # ⚠️ 北证50指数—— 早先被误判为 A 股
@@ -84,11 +85,36 @@ class TestIsAShare:
 
 
 class TestIsBShare:
-    @pytest.mark.parametrize("code", ["sh900901", "sh900933", "sz200011"])
+    """B 股三段各一实证用例（sh900 / sz200 / sz201）+ A 股近邻反例。
+
+    ⚠️ sz201872（招港B）曾因 201 段漏判落进「其他品种」，
+       UNITS U7 连坐约 242 格/年假封（2026-10-13 实测）。202 段无实例
+       （段族归一，异例由 G4 门兜底）；深 B 与沪 B 价格系数不同纲（U7）。
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "sh900901",   # 沪 B 900 段
+            "sh900933",   # 沪 B 900 段
+            "sz200011",   # 深物业B（sz200 段）
+            "sz201872",   # 招港B（sz201 段——旧版漏判，本案例即立案证据）
+        ],
+    )
     def test_B股(self, code: str) -> None:
         assert is_b_share(code) is True
 
-    @pytest.mark.parametrize("code", ["sh600519", "sz000001", "sz300750"])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "sh600519",   # A 股
+            "sz000001",   # 深主板 A 股（sz200 段数字前邻）
+            "sz300750",   # 创业板
+            "sz000029",   # 深中华A——深中华B(sz200017) 的 A 股近邻反例
+            "sz159901",   # 深市基金 1x 段（与 2x B 股相邻，禁误扩）
+            "sh113050",   # 沪市可转债
+        ],
+    )
     def test_非B股(self, code: str) -> None:
         assert is_b_share(code) is False
 
