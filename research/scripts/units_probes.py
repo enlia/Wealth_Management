@@ -294,3 +294,52 @@ def g4_identity_report(rows) -> dict:
         "groups": groups,
         "sz_b_alert": sz_b_alert,
     }
+
+
+def g4_identity_check(con: sqlite3.Connection, on: int | None = None
+                      ) -> tuple[dict, list[str], list[str]]:
+    """G4 门真库取数检查（只读）：单交易日切片 → g4_identity_report。
+
+    on 缺省 = 库内**行数最多**的交易日（全量覆盖日自适应；残段日免入——
+    实测 20261002 仅 57 行且 amount/vol 全 0，作切片会整组 UNKNOWN）。口径 =
+    **单日切片**（发现面足够、秒级自检），与 B14 全历史分组锚（深 B 中位 9.98）
+    数值可比但窗口不同，打印随行注明。返回 ``(report, msgs, warns)``：深 B 组过
+    U7② 门 = U7 同族量纲污染 → msgs（阻断项）；组不可检 / 行级缺值 UNKNOWN →
+    warns（记录不阻断，**禁填空**）。
+    """
+    if on is None:
+        on = con.execute(
+            "SELECT date FROM bar_daily GROUP BY date"
+            " ORDER BY COUNT(*) DESC, date DESC LIMIT 1").fetchone()[0]
+    rows = con.execute(
+        "SELECT code, amount, vol, close FROM bar_daily WHERE date=?", (on,)
+    ).fetchall()
+    if not rows:
+        raise RuntimeError(f"bar_daily 在 {on} 无行 —— G4 门不可检，先核数据截止日")
+    rep = g4_identity_report((r[0], r[1], r[2], r[3]) for r in rows)
+    rep["on"] = on
+    msgs: list[str] = []
+    warns: list[str] = []
+    if rep["sz_b_alert"] == "U7 同族污染":
+        med = rep["groups"]["深B"]["median"]
+        msgs.append(
+            f"G4 量纲恒等式深 B 组中位 {med:.4f} 过 U7② 门 —— U7 同族量纲污染"
+            "（U5 双净痕直方图形态；bar_daily 深 B 价格系数缺陷的发现面）")
+    elif rep["sz_b_alert"] == "UNKNOWN":
+        warns.append("G4 深 B 组不可检（组无有效行）—— UNKNOWN 不猜，补样后再判")
+    if rep["n_unknown"]:
+        warns.append(
+            f"G4 行级缺值 {rep['n_unknown']} 行 = UNKNOWN（禁填空，不入组统计）")
+    return rep, msgs, warns
+
+
+def g4_identity_summary(rep: dict) -> str:
+    """运行口三小件打印文本：分组中位 / 深 B sz_b_alert / UNKNOWN 计数。"""
+    seg = [f"G4 量纲恒等式 {G4_IDENTITY_FORMULA}（{rep.get('on', '?')} 单日切片）"]
+    for grp in G4_GROUP_ORDER:
+        g = rep["groups"][grp]
+        med = "UNKNOWN" if g["median"] is None else f"{g['median']:.4f}"
+        seg.append(f"  {grp:<6} 有效 {g['n_valid']:>6}  中位 {med:>8}  {g['verdict']}")
+    seg.append(f"  深 B 组告警：{rep['sz_b_alert']} ｜ 行级 UNKNOWN 计数："
+               f"{rep['n_unknown']}")
+    return "\n".join(seg)
