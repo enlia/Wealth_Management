@@ -13,14 +13,15 @@
 #    （sqlite_source.py / universe.py），漏入库会让全新克隆必然崩溃：
 #      ModuleNotFoundError: No module named 'factor_lab.data'
 #    本地能跑是因为工作区残留文件，CI 与他人克隆才暴露。
-#    同理reference/ runtime/ 也已锚定。
+#    同理 reference/ runtime/ 也已锚定（⚠️ 曾有"注释称已锚定、正文没锚定"
+#    的言行不一行，2026-10-07 整改为真正锚定并以 check-ignore 探针留证）。
 /data/
-*.db
-*.db-wal
-*.db-shm
+/*.db
+/*.db-wal
+/*.db-shm
 *.sqlite
 *.sqlite3
-raw/
+/raw/
 
 # ── 列式/二进制数据文件 ─────────────────────────────────────
 *.parquet
@@ -36,14 +37,16 @@ raw/
 
 # ── 运行时产出（可由脚本重新生成，含 68M 中间结果）────────────
 # ⚠️ 目录重组：原 09_研究项目/factor_lab/out/ → runtime/
-runtime/
-out/
-output/
-reports/generated/
+# ⚠️ 全部目录规则一律前导斜杠锚定到仓库根（P20 教训）：
+#    不锚定会吞掉代码层里的同名目录。
+/runtime/
+/out/
+/output/
+/reports/generated/
 
 # ── 第三方开源项目（935M，只读参考）────────────────────────
 # ⚠️ 目录重组：原 06_开源项目/ → reference/
-reference/
+/reference/
 
 # ── 研究产出：只忽略中间 CSV，保留报告与结论 ────────────────
 # ⚠️ 原规则是results/（整目录忽略），导致 05_实证研究 下的
@@ -113,3 +116,21 @@ desktop.ini
 *.pem
 token.txt
 *tushare_token*
+
+# ── 会话与工具工作区（2026-10-07 新增，全部锚定）────────────
+# .worktree/  git worktree 统一放这里（项目 AGENTS.md 一.6）
+# .planning/  会话台账/报告（不入库；结论蒸馏进 docs/ 或 standards 才入库）
+# .workbuddy/ 弃用工具的记忆目录兜底（防止任何工具再写入后混进版本库）
+/.worktree/
+/.planning/
+/.workbuddy/
+
+# ── 回滚兜底资产（2026-10-07 新增：2.8 GB 兜底包 + 解包目录，永不入库）──
+# 判据：AGENTS.md 五节「不进 git」；物理位置建议挪到项目外
+# 依据：.planning/reports/backup-package-audit-2026-10-07.md
+/Wealth_Management_data/
+/Wealth_Management_data.7z
+# ⚠️ 实物已于 2026-10-07 移出项目：C:\Documentation\WorkSpace\_archive\Wealth_Management_data.7z
+#    SHA-256 = 90A742CCBD3EEFDC4C995D584799D7DFA294C87FD5DA003DC756F96836211FF9
+#    本条保留作防误收护栏（任何人把归档拷回项目内也不会被入库）；独有件 包内清单.md 已入档
+#    docs/03_项目报告/归档包Wealth_Management_data_包内清单.md，原解包目录已删。
