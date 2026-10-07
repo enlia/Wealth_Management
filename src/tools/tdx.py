@@ -133,7 +133,7 @@ def price_scale(code, mkt=None):
         if c[0] in "03":
             return 0.01                               # 深市 A股（000/001/002/003/301/302）
         return 0.001                                  # 1x 基金/债券（2x B股已上移 0.01，U7）
-    return 0.01                                       # A股（00/30 开头）与北交所                                       # A股（00/30 开头）与北交所
+    return 0.01                                       # A股（00/30 开头）与北交所
 
 
 def read_day(code, kind="lday", mkt=None):
