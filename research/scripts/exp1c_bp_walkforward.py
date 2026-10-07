@@ -228,7 +228,12 @@ def deflated_sharpe(excess: pd.Series, n_trials: int = N_TRIALS) -> dict:
     t = len(x)
     if t < 3:
         return {"DSR": float("nan"), "SR0": float("nan"), "说明": "样本不足"}
-    sr = float(x.mean() / x.std(ddof=1)) if x.std(ddof=1) > 0 else 0.0
+    _sd = float(x.std(ddof=1))
+    if not (_sd > 0):
+        raise ValueError(
+            f"样本标准差为 0（t={t}）——SR 无定义；窗口退化/常数列会造成假绿，"
+            f" 按项目纪律显式抛出，不得静默取 0.0（2026-10-07 更正）。")
+    sr = float(x.mean() / _sd)
     g3 = float(pd.Series(x).skew())
     g4 = float(pd.Series(x).kurt()) + 3.0
     var = (1 - g3 * sr + (g4 - 1) / 4 * sr ** 2) / t
@@ -236,9 +241,17 @@ def deflated_sharpe(excess: pd.Series, n_trials: int = N_TRIALS) -> dict:
     z1 = NormalDist().inv_cdf(1 - 1 / n_trials)
     z2 = NormalDist().inv_cdf(1 - 1 / (n_trials * e))
     sr0 = sqrt(var) * ((1 - gamma) * z1 + gamma * z2)
-    denom = sqrt(max(1 - g3 * sr + (g4 - 1) / 4 * sr ** 2, 1e-12))
+    _den = 1 - g3 * sr + (g4 - 1) / 4 * sr ** 2
+    if not (_den > 0):
+        raise ValueError(
+            f"DSR 分母项非正（{_den:.6g}，sr={sr:.4g} g3={g3:.4g} g4={g4:.4g}）——"
+            f" 偏度/峰度组合越界；不得 max(·,1e-12) 钳死后继续（2026-10-07 更正）。")
+    denom = sqrt(_den)
     dsr = float(NormalDist().cdf((sr - sr0) * sqrt(t - 1) / denom))
-    return {"期数T": t, "每期SR": sr, "年化SR": sr * sqrt(252), "SR0": sr0,
+    return {"期数T": t, "每期SR": sr, "窗口SR": sr,
+            "年化SR_对照": sr * sqrt(252),
+            "年化SR_口径警告": "窗口本身已是年度口径，√252 折算仅作对照、勿引用（2026-10-07 更正）",
+            "SR0": sr0,
             "DSR": dsr, "N_trials": n_trials,
             "公式": "Bailey & López de Prado (2014) Deflated Sharpe（自算等效件）"}
 
@@ -270,25 +283,55 @@ def anchor_checks(panel: pd.DataFrame) -> list[dict]:
     # 例 3：bp 反推价 = bps / bp 须回到当日未复权 close（逐月抽查 3 期）
     con = sq.connect(f"file:{DB_PATH.as_posix()}?mode=ro", uri=True)
     q = ("SELECT end_date, bps FROM ts_fina_indicator "
-         "WHERE ts_code='600519.SH' AND end_date IN "
+         "WHERE ts_code='sh600519' AND end_date IN "
          "('20240331','20240630','20240930') ORDER BY end_date")
     bps = pd.read_sql_query(q, con)
     con.close()
+    if bps.empty:
+        raise RuntimeError(
+            "bp 反推自查取数为 0 行：ts_fina_indicator 的 ts_code 是前缀形（如 sh600519），"
+            " 写成 600519.SH 会静默 0 行、自查恒不产出（2026-10-07 实测：sh600519 103 行 / 三期 bps 齐备）。")
     mini = panel[panel["sym"] == "sh600519"]
     fac = build_financial_factors(mini, px_raw.index, px_raw, shares=None)
     bp_s = fac["bp"].unstack("asset")["sh600519"].dropna()
+    # ⚠️ 2026-10-07 更正（本条自查此前「恒不产出」→修好取数后暴露出**前提违反前视红线**）：
+    #   因子侧是严格 PIT（只看到当日已公布的财报），因此 bp(d) 用的 bps 是
+    #   「available_date ≤ d 的最新一期」，**不是** end_date == 本期的那个数。
+    #   拿同报告期 bps 去反推价必然差几个百分点（实测 2024Q1: 1721 vs 1894）。
+    #   正确恒等式：bps(截至 d 可用) / bp(d) == close(d)，容差取恒等式级。
+    _av = (mini[["available_date", "bps"]].dropna()
+           .sort_values("available_date").reset_index(drop=True))
+    if _av.empty:
+        raise RuntimeError("sh600519 的可对齐 bps 为空——PIT 自查无法成立（不得静默跳过）")
     for _, r in bps.iterrows():
-        ed = pd.to_datetime(r["end_date"])
+        _raw_ed = str(r["end_date"]).strip()
+        if _raw_ed.endswith(".0"):          # 实测：ts_fina_indicator.end_date 是 REAL（20240331.0）
+            _raw_ed = _raw_ed[:-2]
+        # ts_fina_indicator.end_date 是 'YYYYMMDD' 整数/字符串；直接 to_datetime 会落到 1970-01-01
+        # （实测导致例3 全部对齐到首个交易日、锚点判据失效）——必须显式按 %Y%m%d 解析（2026-10-07 更正）
+        ed = (pd.to_datetime(_raw_ed, format="%Y%m%d")
+              if len(_raw_ed) == 8 and _raw_ed.isdigit() else pd.to_datetime(_raw_ed))
         after = bp_s.index[bp_s.index > ed]
         if not len(after):
+            rows.append({"锚点": f"例3 bp 反推价 sh600519 {ed:%Y-%m-%d}",
+                         "期望": None, "实测": None, "一致": False,
+                         "说明": "该财报期后无交易日（样本窗口不足），显式记账而非静默 continue"})
             continue
         d = after[0]
         bp_v = float(bp_s.loc[d])
-        implied = float(r["bps"]) / bp_v
+        _use = _av[_av["available_date"] <= d]
+        if _use.empty:
+            rows.append({"锚点": f"例3 bp 反推价 sh600519 {ed:%Y-%m-%d}→{d:%Y-%m-%d}",
+                         "期望": None, "实测": None, "一致": False,
+                         "说明": "该日尚无可对齐财报（PIT），显式记账"})
+            continue
+        bps_pit = float(_use.iloc[-1]["bps"])
+        implied = bps_pit / bp_v
         px = float(px_raw.loc[d, "sh600519"])
         rows.append({"锚点": f"例3 bp 反推价 sh600519 {ed:%Y-%m}→{d:%Y-%m-%d}",
                      "期望": round(px, 2), "实测": round(implied, 2),
-                     "一致": abs(implied - px) < 0.02 * px})
+                     "相对误差": round(abs(implied - px) / px, 8),
+                     "一致": abs(implied - px) < 1e-6 * px})
     return rows
 
 
@@ -416,10 +459,14 @@ def main() -> int:
         z, price_f = z.loc[dates], px_adj.loc[dates]
         mcap_f = mcap.reindex(index=dates)
         cost = COSTS["往返20bp"]
+        n_empty_windows = 0
         for i, (_, te) in enumerate(make_windows(dates, spec)):
             m = mcap_f.loc[te[-1]].reindex(z.columns)
             valid = [c for c in z.columns if pd.notna(m.get(c, np.nan))]
             if not valid:
+                n_empty_windows += 1
+                print(f"[WARN] 窗口 {te[0]}~{te[-1]} 层内有效市值样本为空，已跳过并计数"
+                      f"（n_empty_windows={n_empty_windows}）——不得静默 continue（2026-10-07 更正）")
                 continue
             q1, q2 = m[valid].quantile([1 / 3, 2 / 3])
             buckets = {"大": [c for c in valid if m[c] >= q2],
@@ -444,6 +491,11 @@ def main() -> int:
     dsr_rows = []
     for f in names:
         wins_df = results[(f, "往返20bp")][0]
+    if wins_df is None or len(wins_df) == 0 or "超额" not in getattr(wins_df, "columns", []):
+        raise RuntimeError(
+            f"因子 {f} 没有任何有效滚动窗口（wins_df 空/缺『超额』列）——"
+            f" 多为 --start/--end 未覆盖『训练 3 年 + 测试 12 月』所致；"
+            f" 必须显式失败，不得让后续 DSR 以 KeyError 形式暴露（2026-10-07 更正）。")
         # 用窗口超额的时间邻接近似：T=窗口数太少，改用各窗口内月度换手口径不可得
         # ⇒ 以窗口超额序列 + 期数=有效交易日数并注记（等效说明）
         dsr = deflated_sharpe(wins_df["超额"], n_trials=N_TRIALS)
