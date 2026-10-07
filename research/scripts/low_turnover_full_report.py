@@ -10,7 +10,7 @@ LABEL = "【全量实测·发布待双闸】"
 
 CALIBER_HEADER = (
     "| 价格口径 | 换手单位 | 年化方式 |\n|---|---|---|\n"
-    "| 后复权 close_adj（未复权断点见 UNITS U5 注） | 倍/年（双边 L1=引擎口径，单边=½）"
+    "| 前复权（qfq）close_adj（口径断点见 AGENTS 九·5/6） | 倍/年（双边 L1=引擎口径，单边=½）"
     "与 %/日 均值×252；算式列逐行给出 | 几何 _year_span（自然日/365.25，策略与基准同函数）；"
     "252 仅倍数换算层（SCALING_TRADING_DAYS） |"
 )
@@ -95,7 +95,7 @@ def render_full(res: dict) -> str:
     for d in res["deflated"]["rows"]:
         out.append(f"| {d['name']} | {d['sr_annual']:.4f} | {d['sr0']:.4f} | {d['dsr']:.4f} | {d['n_obs']} |")
 
-    out += ["", "## 与冒烟数字勾稽", res.get("勾稽", "（见实验1a-smoke.md §三：冒烟=9 票池持 7、等权手工模拟；"
+    out += ["", "## 与冒烟数字勾稽", res.get("勾稽", "（见 .planning/reports/experiment1a-smoke.md（会话台账层，未入 git） §三：冒烟=9 票池持 7、等权手工模拟；"
             "全量=全池 build_universe、引擎逆波动率权重、7 窗/三段/层内——口径不同不可直接比大小，"
             "换手量级与档距方向性一致才可勾稽）"), ""]
     out += ["## 多重比较声明", "本轮参数网格 6 组合 + 层内 18 + 三段 18 列（列数如实）；"

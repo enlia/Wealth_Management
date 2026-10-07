@@ -12,7 +12,7 @@
 
 流程与复用（禁重造，仓规一.1）
 ----------------------------
-1. 数据读入   ：run_long_only.load_long_chunked（分年加载后复权价；market.db
+1. 数据读入   ：run_long_only.load_long_chunked（分年加载前复权（qfq）价；market.db
                 只读 mode=ro；自带 int→datetime 等实测修正）；逐码覆盖清单显式打印
 2. 因子打分   ：factor_lab.factors.price_volume.compute_factor +
                 run_long_only._cross_z（横截面 z）+ run_long_only.combine；
@@ -27,13 +27,13 @@
                 期成本 = 单边换手 × round_trip（20bp/完整往返 = 买入 7.5bp +
                 卖出 12.5bp）⚠ 分析层 long_only.CostModel（往返 30.2bp）与
                 config 口径不同，本脚本按任务书固定 config 口径
-6. 绩效输出   ：收益**从后复权价算**（禁从因子值算）；年化几何 `_year_span`
+6. 绩效输出   ：收益**从前复权（qfq）价算**（禁从因子值算）；年化几何 `_year_span`
                 （自然日/365.25，与基准同一函数）；报告模板=P14 四要素列头 +
                 口径三件套列头 + 多重比较声明位 + 「不构成投资建议」尾句
 
 口径三件套（D8 判决强制列头）
 ----------------------------
-  价格口径：后复权 close_adj ｜ 换手单位：倍/月·倍/年（单边，算式 ½·Σ|Δw|）
+  价格口径：前复权（qfq） close_adj ｜ 换手单位：倍/月·倍/年（单边，算式 ½·Σ|Δw|）
   年化方式：几何 _year_span（年数=自然日/365.25）；252 仅倍数换算层（铁律 7 分层）
 
 用法（冒烟示例）
@@ -68,7 +68,7 @@ OUTPUT = ROOT / "runtime" / "low_turnover_monthly"
 
 # ── 1) 数据读入 ────────────────────────────────────────────────
 def load_inputs(codes: list[str], start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """读入长表（算因子）与后复权价格宽表（算收益）；逐码覆盖清单显式打印。
+    """读入长表（算因子）与前复权（qfq）价格宽表（算收益）；逐码覆盖清单显式打印。
 
     ⚠ 覆盖清单必须打印：退市/停牌/次新可能被 SQL 的 `close_adj IS NOT NULL`
       静默剔除，不列清单就是静默失败（空结果 ≠ 真没有）。
@@ -179,7 +179,7 @@ def target_weights(held: np.ndarray) -> np.ndarray:
 # ── 4/5) 换手 + 成本 + 收益模拟 ─────────────────────────────────
 def simulate(price: pd.DataFrame, held: np.ndarray, w_slots: np.ndarray,
              is_rebal: np.ndarray) -> dict:
-    """等权目标权重、非调仓日沿用的月频模拟；收益从后复权价算（次期实现，防前视）。
+    """等权目标权重、非调仓日沿用的月频模拟；收益从前复权（qfq）价算（次期实现，防前视）。
 
     换手算式：单边换手 = ½·Σ|Δw|（全股票空间权重 L1 差，向哨兵列双零贡献）；
       事件表手算锚：n_valid 恒定的调仓日，单边换手 = 新进槽数 ÷ n_valid。
@@ -262,7 +262,7 @@ def render_report(sim: dict, price: pd.DataFrame, factors: list[str], spec: dict
         "",
         "## 口径三件套（强制列头）",
         "| 价格口径 | 换手单位 | 年化方式 |", "|---|---|---|",
-        "| 后复权 close_adj | 倍/月·倍/年（单边）；算式 ½·Σ&#124;Δw&#124; | "
+        "| 前复权（qfq） close_adj | 倍/月·倍/年（单边）；算式 ½·Σ&#124;Δw&#124; | "
         "几何 _year_span（自然日/365.25）；252 仅倍数换算层 |",
         "",
         "## P14 四要素（每格均带冒烟标）",
@@ -289,7 +289,7 @@ def render_report(sim: dict, price: pd.DataFrame, factors: list[str], spec: dict
         "",
         "## 多重比较声明（留位，如实列）",
         f"本轮尝试组合数 = {attempts}（因子 {factors} × 缓冲档数）；**未做多重比较校正**；"
-        f"正式结论单须补 mlfinlab Deflated Sharpe 校正（task_plan.md 共同红线），此处留位。",
+        f"正式结论单须用本仓自实现 Deflated Sharpe 校正（src/factor_lab/analysis/deflated.py，Bailey & López de Prado 2014 公式；mlfinlab 本机不可用）——task_plan.md 共同红线，此处留位。",
         "",
         "## 免责",
         SMOKE_LABEL + " 全部数字为小样本骨架冒烟产物，不构成投资建议。",
@@ -322,7 +322,7 @@ def main() -> int:
     picks = {b: map_buffer(args.n_hold, b) for b in buffers}
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"{SMOKE_LABEL} 实验轮 1·A 线 低换手月频骨架（后复权口径）")
+    print(f"{SMOKE_LABEL} 实验轮 1·A 线 低换手月频骨架（前复权（qfq）口径）")
     long, price = load_inputs(codes, args.start, args.end)
     n_pool_eff = len(set(price.columns)) if len(price.columns) else 0
     eff = assert_distinct_pools(picks, n_pool_eff)
