@@ -293,10 +293,12 @@ def audit_price_data(
     b_raw = (1 + ret.mean(axis=1)).cumprod().iloc[-1]
     b_clean = (1 + clean.mean(axis=1)).cumprod().iloc[-1]
     # 交易日数折年数属 ② 时长换算兜底（无日期索引输入：交易日数 ÷ 年均交易日），
-    # 口径值 YEAR_TRADING_DAYS = 243。年化三层口径（PITFALLS P10「年化三层口径裁决」）：
+    # 口径值 YEAR_TRADING_DAYS = 243。年化三层口径（摘列；判例真源 PITFALLS P10
+    # 「年化三层口径裁决」）：
     #   ① 倍数换算 ×252/periods、σ×√252 → SCALING_TRADING_DAYS
     #   ② 时长换算兜底（本行属此层）    → YEAR_TRADING_DAYS = 243
     #   ③ 有日期的年跨越                → 自然日 365.25
+    #     （③ 主路径未启用：口径设计/值冻结沿革；如启用日期索引式另立单换 365.25）
     # 此前注记的「层间分歧」在本行处理：历史输出按 252 折算、值冻结不倒改；
     # 本次起新输出按 ② 层 = 243，差值打印行随行带折年系数注。
     # （① 层系数串进 ② 层曾使年数记小约 3.57% =1−243/252、
