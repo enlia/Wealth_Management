@@ -53,6 +53,8 @@ from units_probes import (  # noqa: E402
     U6_FORMULA_C,
     compare_bps_with_db,
     equity_identity_guard,
+    g4_identity_check,
+    g4_identity_summary,
     implied_bps_a,
     implied_bps_c,
     ordinary_equity_yi,
@@ -356,6 +358,8 @@ def main() -> int:
         msgs += check_against_tushare(con)
     u6_msgs, u6_warns = check_equity_caliber(con)
     msgs += u6_msgs
+    g4_report, g4_msgs, g4_warns = g4_identity_check(con)
+    msgs += g4_msgs
     # 修复 SQL 幂等断言常驻自检（试验只在内存副本上做，真库全程只读）
     fix_probe = assert_fix_sql_idempotent(stock_info_fix_copy(con))
     con.close()
@@ -364,7 +368,8 @@ def main() -> int:
     print("=" * 72)
     print(f"修复 SQL 幂等断言：副本首跑变动 {fix_probe['first_run_rows']} 行、"
           f"重跑变动 {fix_probe['second_run_rows']} 行 → 重跑结果不变 ✓")
-    for w in u6_warns:
+    print(g4_identity_summary(g4_report))
+    for w in u6_warns + g4_warns:
         print(f"  ⚠ 记录（不阻断）：{w}")
     if msgs:
         print(f"✗ 发现 {len(msgs)} 个问题：")
