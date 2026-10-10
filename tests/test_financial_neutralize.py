@@ -134,3 +134,44 @@ class TestChunkedEqualsMonolithic:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class TestNeutralizeWithNaNHoles:
+    """🔴 BLOCK 守护（2026-10-10 实测 `--neutral` 崩溃抓出）。
+
+    bug：`r.loc[ok.index] = resid.to_numpy()`。
+    `ok` 是**与 row 等长**的布尔掩码，`ok.index` 是**全部标的**；
+    而 `resid` 只有 `ok.sum()` 行。
+    只要当日存在 NaN 因子值（新股未披露、财报缺失），
+    索引器长度就 ≠ 值长度 ⇒
+        ValueError: cannot set using a list-like indexer with a
+        different length than the value
+    ⇒ **只要有 NaN 就100% 崩溃**，全市场跑必崩。
+
+    为什么旧测试测不出来：
+    `_fixture()` 造的 `wide` **全无 NaN** ⇒ `ok.sum() == len(codes)`
+    ⇒ 索引器长度恰好等于值长度 ⇒ 长度不匹配永不触发。
+    **全满的fixture = 橡皮章**，与「恒等断言」同一类陷阱。
+    """
+
+    def test_当日存在NaN时仍能跑且只改有效位(self):
+        days, codes, wide, daily = _fixture()
+        # 在第一天的因子值里挖 20 个 NaN（模拟新股未披露/财报缺失）
+        wide = wide.copy()
+        wide.iloc[0, :20] = np.nan
+
+        panels = {"bp": [wide.copy()]}
+        fp._neutralize_chunk(panels, daily, ["bp"], days, wide.columns)
+        out = panels["bp"][-1]
+
+        assert out.shape == wide.shape, "形状变了"
+        # 关键：NaN 位必须仍是 NaN（不能被中性化结果填上）
+        仍为NaN = out.iloc[0, :20].isna().all()
+        assert 仍为NaN, (
+            f"第一天前 20 个原本是 NaN，中性化后变成 "
+            f"{out.iloc[0, :20].notna().sum()} 个有效值 "
+            f"⇒ NaN 位置被错填")
+        # 有效位不能被清空
+        有效 = out.iloc[0, 20:].notna().sum()
+        assert 有效 == len(codes) - 20, (
+            f"第一天有效位只剩 {有效}/{len(codes) - 20} ⇒ 有效值被误清")

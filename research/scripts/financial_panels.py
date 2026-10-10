@@ -151,7 +151,17 @@ def _neutralize_chunk(panels: dict[str, list[pd.DataFrame]],
                 (logcap.loc[dt][ok].to_numpy()
                  if logcap is not None else None))
             r = row.copy()
-            r.loc[ok.index] = resid.to_numpy()
+            # 🔴 BLOCK（2026-10-10 实测 --neutral 崩溃抓出）：
+            #   `ok` 是**与 row 等长**的布尔掩码，`ok.index` 是**全部标的**
+            #   （全市场 5,267 个），而 `resid` 只有 `ok.sum()` 行。
+            #   初版写 `r.loc[ok.index] = resid.to_numpy()`
+            #   ⇒ 索引器长度 5267 ≠ 值长度 ⇒
+            #     ValueError: cannot set using a list-like indexer with a
+            #     different length than the value
+            #   而单元测试用打桩恒等函数 + 小面板，列数恰好相等 ⇒ 测不出来。
+            #   正确写法：用**布尔掩码**或 `sub.index`（筛后的代码），
+            #   二者长度都等于 ok.sum()。
+            r.loc[ok.values] = resid.to_numpy()
             acc.append(r)
         # ⚠️ **不要再 .T** —— `DataFrame(acc, index=days)` 已是 (日期 × 标的)
         panels[n][-1] = pd.DataFrame(acc, index=days).reindex(
