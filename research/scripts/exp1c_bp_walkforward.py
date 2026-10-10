@@ -47,7 +47,13 @@ sys.path.insert(0, str(ROOT / "research" / "scripts"))
 import build_financial_panel as fin_panel  # noqa: E402
 from financial_factors import build_financial_factors, neutralize  # noqa: E402
 from run_long_only import _bench_stats, _cross_z  # noqa: E402
-from run_size_decile import _run_sub  # noqa: E402
+
+#🔴 2026-10-10：`run_size_decile._run_sub` 已抽离到 size_decile_core
+#   （分层逻辑唯一来源，两份实现曾导致同一因子年化差 10 倍）。
+#   `run_in_subset` 与原 `_run_sub` **算法完全相同**，只是多返回跳过原因。
+#   本分支把 `run_size_decile` 重构成调用共享 core 后，此处 import 断裂
+#   （ImportError 直接让 tests/test_exp1c_disclosure.py 收集失败）。
+from size_decile_core import run_in_subset  # noqa: E402
 
 from factor_lab.analysis.long_only import CostModel, PortfolioSpec, build_long_only  # noqa: E402
 from factor_lab.analysis.walk_forward import WindowSpec, judge, make_windows  # noqa: E402
@@ -476,8 +482,9 @@ def main() -> int:
                 fill_method=None).mean(axis=1))
             row = {"因子": f, "窗口": i, "基准": bench}
             for lab, cols in buckets.items():
-                v = _run_sub(z.loc[te, cols], price_f.loc[te, cols], cost,
-                             30, 3, f)
+                v, _why = run_in_subset(z.loc[te, cols],
+                                        price_f.loc[te, cols], cost,
+                                        30, 3, f)
                 row[lab] = v
                 row[f"{lab}超额"] = v - bench if pd.notna(v) else np.nan
             lay_rows.append(row)

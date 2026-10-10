@@ -107,6 +107,21 @@ def build_panel(verbose: bool = True) -> pd.DataFrame:
     d = d.sort_values("available_date").drop_duplicates(
         subset=["sym", "report_period"], keep="last")
 
+    # 🔴 MAJOR（2026-10-06 review 抓出）：`available_date` 会撞车。
+    #   `earliest_available_date` 把「一季报 03-31 → 当年 04-30」与
+    #   「年报 12-31 → 次年 04-30」映射到**同一天**，
+    #   实测 295,833 组里有 58,004 组撞车（最大重复 2）。
+    #   撞车不造成前视（两条同日才可见），但下游按 `['sym','available_date']`
+    #   排序后 ffill 时，**取到哪条取决于原始 CSV 行序**，不是业务规则。
+    #   修法：显式规定「同日多条取 report_period 最大的那条」（年报优先于 Q1），
+    #   把「取最后一条」从排序偶然变成显式口径。
+    n_before = len(d)
+    d = d.sort_values(["sym", "available_date", "report_period"])
+    d = d.drop_duplicates(subset=["sym", "available_date"], keep="last")
+    if verbose and len(d) != n_before:
+        print(f"  同日多报告期归并: {n_before:,} → {len(d):,} 行"
+              f"（{n_before - len(d):,} 条被更晚的报告期覆盖）")
+
     # 派生因子
     # 1) 现金流质量：每股经营现金流 / 每股收益
     d["cf_quality"] = d["cfps"] / d["eps"].replace(0, np.nan)
