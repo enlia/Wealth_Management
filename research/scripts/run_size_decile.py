@@ -54,21 +54,24 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "research" / "scripts"))
 
-from factor_lab.analysis.long_only import (  # noqa: E402
-    CostModel,
-    PortfolioSpec,
-    build_long_only,
+from run_long_only import _cross_z, build_panel  # noqa: E402
+
+# 🔴 分层逻辑**唯一来源**（2026-10-06 抽离）。
+#   初版在本文件与 run_financial_walk_forward.py 各写一份，
+#   实测两份在同一份数据上差10 倍（策略区间不一致），
+#   且都用窗口末日市值分层 ⇒ 循环论证。
+from size_decile_core import (  # noqa: E402
+    interpret_layer_median,
+    size_decile_run,
 )
+
+from factor_lab.analysis.costs import CostModel  # noqa: E402
 from factor_lab.analysis.tradability import tushare_to_local_code  # noqa: E402
 from factor_lab.analysis.walk_forward import WindowSpec, make_windows  # noqa: E402
 from factor_lab.config import is_a_share  # noqa: E402
 from factor_lab.data import all_codes  # noqa: E402
 
-from run_long_only import _bench_stats, _cross_z, build_panel  # noqa: E402
-
 OUTPUT = ROOT / "runtime" / "walk_forward"
-# 分层内至少要有这么多只，否则选不出30 只 + 候选池
-MIN_STOCKS_PER_BUCKET = 120
 
 
 def load_circ_mv(start: str, end: str) -> pd.DataFrame:
@@ -80,7 +83,6 @@ def load_circ_mv(start: str, end: str) -> pd.DataFrame:
        而它们恰恰是「跌得最多」的那批 ——
        会让反转类因子看起来凭空多出收益。
     """
-    import os
     p = ROOT / "runtime" / "tushare" / "daily_basic.parquet"
     if not p.exists():
         raise FileNotFoundError(
@@ -96,19 +98,6 @@ def load_circ_mv(start: str, end: str) -> pd.DataFrame:
     panel = df.pivot_table(index="date", columns="code", values="circ_mv",
                            aggfunc="last").sort_index()
     return panel
-
-
-def _run_sub(z_sub: pd.DataFrame, px_sub: pd.DataFrame,
-             cost: CostModel, n_hold: int, n_pick_mult: int,
-             factor: str) -> float:
-    """在给定的股票子集内跑回测，返回年化收益。"""
-    if z_sub.shape[1] < max(n_hold * 4, MIN_STOCKS_PER_BUCKET):
-        return float("nan")
-    spec = PortfolioSpec(name="layer", n_hold=n_hold,
-                         n_pick=n_hold * n_pick_mult, rebalance="M",
-                         factor=factor)
-    r = build_long_only(z_sub, spec, cost, px_sub)
-    return float(r["年化收益"]) if r.get("ok") else float("nan")
 
 
 def main() -> int:
@@ -128,7 +117,9 @@ def main() -> int:
     print("市值分层混淆检验")
     print("=" * 88)
     print("问题：因子的收益来自信号，还是仅来自「系统性买小盘股」？")
-    print("做法：按历史时点流通市值分三层，每层内独立选因子最高的 N 只。\n")
+    print("做法：按历史时点流通市值分三层，每层内独立选因子最高的 N 只。")
+    print("⚠ 分层用**窗口首日**市值 —— 用末日市值等于用年内涨幅分层，")
+    print("  再拿该层收益当基准是循环论证（实测大盘层基准虚高 18.5pp）。")
 
     mcap = load_circ_mv(args.start, args.end)
     print(f"流通市值面板 {mcap.shape}，"
@@ -148,91 +139,63 @@ def main() -> int:
         z = _cross_z(panels[f])
         dates = sorted(set(z.index) & set(price.index))
         z, price_f = z.loc[dates], price.loc[dates]
-        mcap_f = mcap.reindex(index=dates)
         windows = make_windows(dates, spec)
         if not windows:
-            print(f"  ⚠ {f}: 无法生成窗口")
+            print(f"  ⚠ {f}: 样本 {dates[0]:%Y-%m-%d} ~ {dates[-1]:%Y-%m-%d}"
+                  f"（{len(dates)} 交易日）无法生成窗口。"
+                  f" 需 ≥{spec.train_years} 年训练 + "
+                  f"{spec.test_months} 月测试 ⇒ 往前推 --start，"
+                  f"或用 --train-years 2。")
             continue
 
-        print(f"\n{'─'*72}\n【{f}】分层年化收益")
-        print(f"  {'窗口':>4}{'全市场':>11}{'大盘层':>11}{'中盘层':>11}"
-              f"{'小盘层':>11}{'基准':>10}")
-        print("  " + "-" * 58)
-        agg: dict[str, list[float]] = {k: [] for k in
-                                       ("全", "大", "中", "小", "基准")}
-        bench = price_f.pct_change(fill_method=None).mean(axis=1)
-        for i, (_, te) in enumerate(windows):
-            m = mcap_f.loc[te[-1]].reindex(z.columns)
-            valid = [c for c in z.columns if pd.notna(m.get(c, np.nan))]
-            q1, q2 = m[valid].quantile([1 / 3, 2 / 3])
-            buckets = {
-                "全": valid,
-                "大": [c for c in valid if m[c] >= q2],
-                "中": [c for c in valid if q1 <= m[c] < q2],
-                "小": [c for c in valid if m[c] < q1],
-            }
-            vals: dict[str, float] = {}
-            for label, cols in buckets.items():
-                # ⚠️ **必须只跑测试窗口 `te`**。
-                #   初版传的是 `z[cols]`（全期 2016-2026），
-                #   而 walk_forward 传的是 `p.loc[te]`（仅测试段）。
-                #   口径不一致导致年化被 11 年摊薄：
-                #   rev5 全市场在 walk_forward 是 +19.80%，
-                #   在这里只报 +2.19% —— **同一因子差 10 倍**，
-                #   且基准中位相同（21.14%）说明窗口没错，
-                #   只能是策略区间错了。
-                #   两个脚本口径必须一致，否则分层结论不可比。
-                vals[label] = _run_sub(z.loc[te, cols],
-                                        price_f.loc[te, cols], cost,
-                                        args.n_hold, args.n_pick_mult, f)
-                agg[label].append(vals[label])
-            b = _bench_stats(bench.loc[te])
-            agg["基准"].append(b)
-            rows.append({"因子": f, "窗口": i, **vals, "基准": b})
-            print(f"  {i:>4}" + "".join(
-                f"{vals[k]:>11.2%}" if pd.notna(vals[k]) else f"{'N/A':>11}"
-                for k in ("全", "大", "中", "小")) + f"{b:>10.2%}")
-
-        print("  " + "-" * 58)
-        med = {k: float(np.nanmedian(agg[k])) for k in agg}
-        print(f"  {'中位':>4}" + "".join(f"{med[k]:>11.2%}"
-                                       for k in ("全", "大", "中", "小"))
-              + f"{med['基准']:>10.2%}")
-
-        _interpret(f, med)
+        # 🔴 分层逻辑已抽到 `size_decile_core`，与财务因子脚本共用一份。
+        #   初版在本文件内各写一份，且用窗口末日市值 ⇒ 循环论证。
+        rows += size_decile_run(z, price_f, mcap, windows, cost,
+                                args.n_hold, args.n_pick_mult, f)
+        report_layers(pd.DataFrame([r for r in rows if r["因子"] == f]), f)
 
     if rows:
         OUTPUT.mkdir(parents=True, exist_ok=True)
-        df = pd.DataFrame(rows)
-        df.to_csv(OUTPUT / "size_buckets.csv", index=False,
-                  encoding="utf-8-sig")
+        pd.DataFrame(rows).to_csv(OUTPUT / "size_buckets.csv", index=False,
+                                 encoding="utf-8-sig")
 
     print("\n以上为统计检验，不构成投资建议。")
     return 0
 
 
-def _interpret(factor: str, med: dict[str, float]) -> None:
-    """按层内表现给结论 —— 这是本脚本存在的全部意义。"""
-    print(f"\n  【{factor}】判读：")
-    layers = ("大", "中", "小")
-    ok = [k for k in layers if pd.notna(med[k])]
-    if len(ok) < 2:
-        print("    层数不足，无法判读")
+def report_layers(df: pd.DataFrame, factor: str) -> None:
+    """打印分层年化与层内超额，并按层内中位给判读。"""
+    if df.empty:
+        print(f"  ⚠ {factor}: 分层无有效数据")
         return
-    layer_med = np.nanmedian([med[k] for k in ok])
-    all_med = med["全"]
-    if layer_med > 0.05:
-        print(f"    ✅ 层内中位{layer_med:+.2%} > 0 ⇒ **信号真实存在**，"
-              f"与市值无关")
-    elif layer_med > 0:
-        print(f"    ⚠ 层内中位 {layer_med:+.2%} 勉强为正但很弱，"
-              f"跨层选（全市场 {all_med:+.2%}）的收益主要来自市值暴露")
-    else:
-        print(f"    ❌ 层内中位 {layer_med:+.2%} ≤ 0 ⇒ **信号无效**，"
-              f"全市场 {all_med:+.2%} 的收益全部来自市值暴露")
-    for k in layers:
-        if pd.notna(med[k]):
-            print(f"       {k}盘层 {med[k]:+.2%}")
+    piv_a = df.pivot_table(index="窗口", columns="层", values="年化")
+    piv_e = df.pivot_table(index="窗口", columns="层", values="层内超额")
+    print(f"\n{'─' * 72}\n【{factor}】分层年化收益 / 层内超额")
+    print(f"  {'窗口':>4}{'全市场':>11}{'大盘层':>11}{'中盘层':>11}"
+          f"{'小盘层':>11}{'层基准(全)':>12}")
+    print("  " + "-" * 66)
+    for w in piv_a.index:
+        ba = df[(df["窗口"] == w)]["全市场基准"]
+        b = ba.iloc[0] if len(ba) else np.nan
+        print(f"  {int(w):>4}" + "".join(
+            f"{piv_a.loc[w, k]:>11.2%}" if k in piv_a.columns
+            and pd.notna(piv_a.loc[w, k]) else f"{'N/A':>11}"
+            for k in ("全", "大", "中", "小"))
+            + (f"{b:>12.2%}" if pd.notna(b) else f"{'N/A':>12}"))
+    print("  " + "-" * 66)
+    med_a = {k: float(np.nanmedian(piv_a[k])) for k in
+             ("全", "大", "中", "小") if k in piv_a.columns}
+    med_e = {k: float(np.nanmedian(piv_e[k])) for k in
+             ("全", "大", "中", "小") if k in piv_e.columns}
+    print(f"  {'年化中位':>4}" + "".join(
+        f"{med_a[k]:>11.2%}" if k in med_a else f"{'N/A':>11}"
+        for k in ("全", "大", "中", "小")))
+    print(f"  {'超额中位':>4}" + "".join(
+        f"{med_e[k]:>11.2%}" if k in med_e else f"{'N/A':>11}"
+        for k in ("全", "大", "中", "小")))
+
+    lvl, msg = interpret_layer_median(med_e)
+    print(f"\n  【{factor}】判读：{lvl} {msg}")
 
 
 if __name__ == "__main__":
