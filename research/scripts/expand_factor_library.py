@@ -64,6 +64,15 @@ from run_financial_study import (build_financial_factors, neutralize,
 def build_pv_factors(long: pd.DataFrame) -> dict[str, pd.Series]:
     """从长表行情构造价量因子。全部只用当日及历史数据，无前视偏差。
 
+    🔴 **价格口径（2026-10-06 修）**：本函数必须收到 `load_long(adjusted=True)`
+       的结果，用 ``close_adj/high_adj/low_adj`` 算收益与形态类因子。
+       初版直接用未复权 ``close/high/low``，而未复权价在除权日有假跳空
+       （分红送转日一次性 −10%），实测会让 16 个因子的单日数值最大偏差 **47.2pp**，
+       足以把因子排名整个颠倒。
+
+       `open` 列本函数从未使用（已核实无任何 `col["open"]` 引用），
+       `load_long` 也不提供 `open_adj`，故不参与计算。
+
     ⚠️ 实现要点（踩坑记录）
        对已按 (code, date) 建索引的 Series 再 `groupby("code").rolling(...)`，
        pandas 会产生**三层索引** (code, code, date)，因为分组键与原索引层重复。
@@ -72,14 +81,23 @@ def build_pv_factors(long: pd.DataFrame) -> dict[str, pd.Series]:
        正解：所有 rolling 结果统一用 `_to_da()` 转成 (date, code) 的 DataFrame，
        再按同一列对齐做算术，全程不用 Series 自动对齐。
     """
+    _need = ("close_adj", "high_adj", "low_adj")
+    missing = [c for c in _need if c not in long.columns]
+    if missing:
+        # 禁止静默 fallback（ENGINEERING 第四节）：缺列就抛，
+        # 绝不退回未复权价继续算。
+        raise ValueError(
+            f"build_pv_factors 缺复权列 {missing}。"
+            "调用方必须用 load_long(..., adjusted=True) 取数；"
+            "用未复权价算收益会引入除权假跳空（实测单日最大偏差 47.2pp）。")
     g = long.sort_values(["code", "date"])
     codes = g["code"].to_numpy()
     dates = pd.DatetimeIndex(g["date"].to_numpy())
     idx = pd.MultiIndex.from_arrays([dates, codes], names=["date", "asset"])
 
     col = {k: pd.Series(g[k].to_numpy(dtype=float), index=idx)
-           for k in ("open", "high", "low", "close", "amount", "vol")}
-    ret = col["close"].groupby(level="asset", group_keys=False).pct_change()
+           for k in ("high_adj", "low_adj", "close_adj", "amount", "vol")}
+    ret = col["close_adj"].groupby(level="asset", group_keys=False).pct_change()
 
     def R(s: pd.Series, w: int, mp: int | None = None, how="mean"):
         """按 asset 分组的rolling，输出【同索引】的 Series。
@@ -101,7 +119,7 @@ def build_pv_factors(long: pd.DataFrame) -> dict[str, pd.Series]:
         """同一索引上安全做四则运算（b 为 0 时置 NaN）。"""
         return a / b.replace(0, np.nan) if not isinstance(b, int) else a + b
 
-    close, amt = col["close"], col["amount"] / 1e8
+    close, amt = col["close_adj"], col["amount"] / 1e8
     vol = col["vol"]
     out: dict[str, pd.Series] = {}
 
@@ -122,7 +140,7 @@ def build_pv_factors(long: pd.DataFrame) -> dict[str, pd.Series]:
     out["volume_shock"] = -(R(vol, 20, 10) / R(vol, 60, 20))
 
     # ── 形态 / 趋势质量 ──
-    out["range_20"] = R((col["high"] - col["low"]) / close, 20, 10)
+    out["range_20"] = R((col["high_adj"] - col["low_adj"]) / close, 20, 10)
     out["vol_ratio_20_60"] = R(ret, 20, 10, "std") / vol60
     out["skew_60"] = R(ret, 60, 30, "skew")
     out["ma_bias_20"] = -(close / R(close, 20, 10) - 1)
@@ -145,113 +163,6 @@ def build_pv_factors(long: pd.DataFrame) -> dict[str, pd.Series]:
         if s.index.duplicated().any():
             s = s[~s.index.duplicated(keep="last")]
         res[k] = s
-    return res
-    """从长表行情构造价量因子。全部只用当日及历史数据，无前视偏差。
-
-    分组说明：
-      低波/ 反转类（文献与前测显示 A 股稳健）
-        low_vol_60负60 日波动率
-        low_vol_120负 120 日波动率
-        id_vol_20   20 日特质波动（残差波动）
-        max_ret_20  过去 20 日最大单日收益（彩票效应，A 股被系统性高估）
-        rev_5跳过最近 5 日的短期反转
-      流动性/ 关注度类
-        amihud_20   Amihud 非流动性
-        turnover_20 换手率对数
-        amt_log20   成交额对数
-        volume_shock 量比：20 日均量 / 60 日均量
-      形态 / 趋势质量类
-        range_20    20 日振幅
-        vol_ratio_20_60 波动率比
-        skew_60     60 日收益偏度
-        ma_bias_20  收盘价对 20 日均线的偏离
-        price_pos250 250 日价格分位（长周期位置）
-        drawdown_60 当前距 60 日高点的回撤
-        illiq_accel 成交额的二阶动量（量能加速）
-    """
-    g = long.sort_values(["code", "date"]).set_index(["code", "date"])
-    out: dict[str, pd.Series] = {}
-
-    ret = g["close"].groupby("code", group_keys=False).pct_change()
-    close = g["close"]
-
-    def roll(s, w, mp=None, fn=None):
-        r = s.groupby("code", group_keys=False).rolling(w, min_periods=mp or max(w // 3, 2))
-        return (r.apply(fn, raw=True) if fn else r.mean())
-
-    # ── 低波/ 反转类 ──
-    vol60 = ret.groupby("code", group_keys=False).rolling(60, min_periods=30).std()
-    out["low_vol_60"] = -vol60
-    out["low_vol_120"] = -ret.groupby(
-        "code", group_keys=False).rolling(120, min_periods=40).std()
-
-    # 短期反转：跳过最近 5 日，取 -5~20 日收益的负值
-    out["rev_5skip5"] = -(close / close.groupby(
-        "code", group_keys=False).shift(20) - 1)
-
-    # 过去 20 日最大单日收益（彩票型特征，A 股中被系统性高估 → 取负）
-    out["max_ret_20"] = -ret.groupby("code", group_keys=False).rolling(
-        20, min_periods=10).max()
-
-    # 特质波动：残差波动率（对市场收益回归后的残差 std）
-    mkt_ret = ret.groupby(level="date").transform("mean")
-    resid = ret - mkt_ret
-    out["idio_vol_20"] = -resid.groupby("code", group_keys=False).rolling(
-        20, min_periods=10).std()
-
-    # ── 流动性 / 关注度 ──
-    amt_yi = g["amount"] / 1e8
-    out["amihud_20"] = (ret.abs() / amt_yi.replace(0, np.nan)).groupby(
-        "code", group_keys=False).rolling(20, min_periods=10).mean()
-    out["turnover_20"] = np.log1p(roll(g["vol"], 20, 10))
-    out["amt_log20"] = roll(np.log1p(amt_yi), 20, 10)
-
-    # 量比：20 日均量 / 60 日均量（放量往往是情绪高点 → 取负）
-    v20 = roll(g["vol"], 20, 10)
-    v60 = g["vol"].groupby("code", group_keys=False).rolling(60, min_periods=20).mean()
-    out["volume_shock"] = -(v20 / v60.replace(0, np.nan))
-
-    # ── 形态 / 趋势质量 ──
-    out["range_20"] = roll((g["high"] - g["low"]) / g["close"].replace(0, np.nan), 20, 10)
-    out["vol_ratio_20_60"] = ret.groupby(
-        "code", group_keys=False).rolling(20, min_periods=10).std() / vol60.replace(0, np.nan)
-    out["skew_60"] = ret.groupby("code", group_keys=False).rolling(
-        60, min_periods=30).skew()
-
-    # 均线偏离：收盘对 20 日均线的偏离（乖离率）
-    # ⚠️ 坑：close 是 (code, date) 两层，rolling 结果也是两层但顺序/名称
-    #    可能不一致 → 直接相减会触发 join 报
-    #    "The name code occurs multiple times, use a level number"。
-    #    正解：统一用 level 编号 0 取第一层后再算。
-    c1 = close.droplevel(0)                    # 变成 (date, code)
-    ma20 = roll(close, 20, 10).droplevel(0)
-    out["ma_bias_20"] = -(c1 / ma20.replace(0, np.nan) - 1)
-
-    # 250 日价格分位（长周期位置，高位跑输 → 取负）
-    roll_max = close.groupby("code", group_keys=False).rolling(
-        250, min_periods=100).max().droplevel(0)
-    roll_min = close.groupby("code", group_keys=False).rolling(
-        250, min_periods=100).min().droplevel(0)
-    out["price_pos250"] = -(c1 - roll_min) / (
-        (roll_max - roll_min).replace(0, np.nan))
-
-    # 距 60 日高点回撤（新高附近动能弱 → 取负）
-    hi60 = close.groupby("code", group_keys=False).rolling(
-        60, min_periods=20).max().droplevel(0)
-    out["drawdown_60"] = c1 / hi60.replace(0, np.nan)
-
-    # 成交额二阶动量（量能加速度）
-    d_amt = amt_yi.groupby("code", group_keys=False).diff()
-    out["illiq_accel"] = d_amt.groupby("code", group_keys=False).rolling(
-        20, min_periods=10).mean()
-
-    # 统一成 (date, asset) 索引
-    res = {}
-    for k, v in out.items():
-        s = v.droplevel(0)
-        s = s.replace([np.inf, -np.inf], np.nan)
-        s.index = s.index.set_names(["date", "asset"])
-        res[k] = s.dropna()
     return res
 
 
@@ -351,7 +262,13 @@ def main() -> int:
     if not full:
         codes = pick_sample(codes, args.n)
     print(f"\n[1/6] 读取 {len(codes):,} 只行情 …")
-    long = load_long(codes, start=cfg.start_date, end=cfg.end_date)
+    # 🔴 adjusted=True：价量因子必须用前复权价（2026-10-06 修）。
+    #    未复权价在除权日有假跳空，实测单日因子值最大偏差 47.2pp。
+    #    `close`（未复权）仍保留在表里，但只给 build_universe 的
+    #    价格区间过滤用 —— 那里的 2~3000 元是**实际成交价**口径，
+    #    本来就该用未复权价。同一张表同时服务两个口径，靠列名区分。
+    long = load_long(codes, start=cfg.start_date, end=cfg.end_date,
+                     adjusted=True)
     info = load_stock_info()
     info = info[info["code"].isin(codes)]
     long = build_universe(long, cfg, info=info, verbose=False)
